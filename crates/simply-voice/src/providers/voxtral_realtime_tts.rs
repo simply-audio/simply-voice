@@ -38,7 +38,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
 use super::voxtral::{DEFAULT_BASE_URL, DEFAULT_TTS_MODEL};
-use super::voxtral_ws::{self, error_message, Ws};
+use super::realtime_ws::{self, error_message, Ws};
 use crate::audio::{AudioChunk, AudioEncoding, AudioFormat};
 use crate::provider::streaming_tts::SESSION_CHANNEL;
 use crate::provider::{StreamingTts, StreamingTtsConfig, TtsEvent, TtsInput, TtsSession};
@@ -117,7 +117,7 @@ impl VoxtralRealtimeTts {
     }
 
     fn url(&self) -> String {
-        voxtral_ws::ws_url(&self.base_url, &format!("/v1/audio/speech/realtime?model={}", self.model))
+        realtime_ws::ws_url(&self.base_url, &format!("/v1/audio/speech/realtime?model={}", self.model))
     }
 }
 
@@ -176,12 +176,12 @@ impl Dial {
     }
 
     async fn handshake(&self) -> Result<Ws> {
-        let mut ws = voxtral_ws::connect(&self.url, &self.api_key)
+        let mut ws = realtime_ws::connect(&self.url, &self.api_key)
             .await
             .context("voxtral realtime TTS: connect")?;
-        voxtral_ws::expect(&mut ws, "session.created", LABEL).await?;
+        realtime_ws::expect(&mut ws, "session.created", LABEL).await?;
         ws.send(Message::Text(self.update.clone().into())).await?;
-        voxtral_ws::expect(&mut ws, "session.updated", LABEL).await?;
+        realtime_ws::expect(&mut ws, "session.updated", LABEL).await?;
         debug!("voxtral realtime TTS: connection ready");
         Ok(ws)
     }

@@ -132,12 +132,12 @@ impl SttProvider for VoxtralProvider {
     }
 
     async fn stream(&self) -> Result<(mpsc::Sender<AudioChunk>, mpsc::Receiver<Transcription>)> {
-        let url = super::voxtral_ws::ws_url(
+        let url = super::realtime_ws::ws_url(
             &self.base_url,
             &format!("/v1/audio/transcriptions/realtime?model={}", self.stt_model),
         );
         tracing::info!(url = %url, has_api_key = !self.api_key.is_empty(), "voxtral STT: connecting WS");
-        let ws_stream = super::voxtral_ws::connect(&url, &self.api_key).await
+        let ws_stream = super::realtime_ws::connect(&url, &self.api_key).await
             .map_err(|e| {
                 tracing::error!(error = %e, "voxtral STT: WS connect failed");
                 e

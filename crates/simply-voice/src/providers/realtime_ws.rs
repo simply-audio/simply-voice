@@ -1,6 +1,6 @@
-//! WebSocket plumbing shared by Voxtral's realtime endpoints (transcription
-//! and speech): the URL, the Bearer-authenticated connect, and reading the
-//! handshake events.
+//! WebSocket plumbing shared by the realtime endpoints (Voxtral's
+//! transcription and speech, Gemini's Live API): the URL, the connect (with a
+//! Bearer key when there is one), and reading Voxtral's handshake events.
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;

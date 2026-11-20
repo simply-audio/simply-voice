@@ -50,7 +50,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, info, warn};
 
 use super::voxtral::{DEFAULT_BASE_URL, DEFAULT_STT_MODEL};
-use super::voxtral_ws::{self, error_message, Ws};
+use super::realtime_ws::{self, error_message, Ws};
 use crate::provider::streaming_stt::SESSION_CHANNEL;
 use crate::provider::{SttCaps, SttEvent, SttInput, SttSession, StreamingStt, StreamingSttConfig, TurnEnd};
 
@@ -209,7 +209,7 @@ impl VoxtralRealtimeStt {
     }
 
     fn url(&self) -> String {
-        voxtral_ws::ws_url(&self.base_url, &format!("/v1/audio/transcriptions/realtime?model={}", self.model))
+        realtime_ws::ws_url(&self.base_url, &format!("/v1/audio/transcriptions/realtime?model={}", self.model))
     }
 
     fn delay_ms(&self) -> Result<u64> {
@@ -286,12 +286,12 @@ impl Dial {
     }
 
     async fn handshake(&self) -> Result<Ws> {
-        let mut ws = voxtral_ws::connect(&self.url, &self.api_key)
+        let mut ws = realtime_ws::connect(&self.url, &self.api_key)
             .await
             .context("voxtral realtime STT: connect")?;
-        voxtral_ws::expect(&mut ws, "session.created", LABEL).await?;
+        realtime_ws::expect(&mut ws, "session.created", LABEL).await?;
         ws.send(Message::Text(self.update.clone().into())).await?;
-        let applied = voxtral_ws::expect(&mut ws, "session.updated", LABEL).await?;
+        let applied = realtime_ws::expect(&mut ws, "session.updated", LABEL).await?;
         debug!(session = %applied["session"], "voxtral realtime STT: connection ready");
         Ok(ws)
     }

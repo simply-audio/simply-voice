@@ -20,10 +20,11 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
+use super::gemini_realtime_tts::GeminiRealtimeTts;
 use crate::audio::{Audio, AudioChunk};
 use crate::provider::{SttProvider, TtsProvider, Transcription, Voice};
 
-const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_STT_MODEL: &str = "models/gemini-2.5-flash";
 const DEFAULT_TTS_MODEL: &str = "models/gemini-2.5-flash-preview-tts";
 const STT_PROMPT: &str = "Transcribe the user's speech verbatim. Return only the transcription — no commentary, no timestamps, no punctuation fixes beyond what was spoken.";
@@ -63,6 +64,11 @@ const PREBUILT_VOICES: &[(&str, &str)] = &[
     ("Sulafat", "Sulafat (warm)"),
 ];
 
+/// The voice used when none is named: the first prebuilt one.
+pub(crate) fn default_voice() -> &'static str {
+    PREBUILT_VOICES.first().map(|(id, _)| *id).unwrap_or("Aoede")
+}
+
 pub struct GeminiProvider {
     client: Client,
     api_key: String,
@@ -90,6 +96,12 @@ impl GeminiProvider {
     pub fn with_tts_model(mut self, model: impl Into<String>) -> Self {
         self.tts_model = model.into();
         self
+    }
+
+    /// Streaming TTS with this provider's key: one streamed request per
+    /// sentence, model `gemini-3.8-flash-lite-tts` (not the batch TTS model).
+    pub fn realtime_tts(&self) -> GeminiRealtimeTts {
+        GeminiRealtimeTts::new(self.api_key.clone()).with_base_url(self.base_url.clone())
     }
 
     fn generate_url(&self, model: &str) -> String {
@@ -224,11 +236,7 @@ impl SttProvider for GeminiProvider {
 #[async_trait]
 impl TtsProvider for GeminiProvider {
     async fn synthesize(&self, text: &str, voice: &str) -> Result<Audio> {
-        let voice_name = if voice.is_empty() {
-            PREBUILT_VOICES.first().map(|(id, _)| *id).unwrap_or("Aoede")
-        } else {
-            voice
-        };
+        let voice_name = if voice.is_empty() { default_voice() } else { voice };
 
         let body = json!({
             "contents": [{ "parts": [{ "text": text }] }],
@@ -273,7 +281,7 @@ impl TtsProvider for GeminiProvider {
 
         let client = self.client.clone();
         let url = self.generate_url(&self.tts_model);
-        let default_voice = PREBUILT_VOICES.first().map(|(id, _)| id.to_string()).unwrap_or_else(|| "Aoede".to_string());
+        let default_voice = default_voice().to_string();
 
         tokio::spawn(async move {
             let mut full_text = String::new();
