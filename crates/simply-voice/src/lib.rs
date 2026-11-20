@@ -10,6 +10,8 @@ pub use provider::{
     Transcription, Voice,
     RealtimeConfig, RealtimeEvent, RealtimeInput,
     StreamingTts, StreamingTtsConfig, TtsEvent, TtsInput, TtsSession, BatchStreamingTts,
+    StreamingStt, StreamingSttConfig, SttCaps, SttEvent, SttInput, SttSession, TurnEnd,
+    BatchStreamingStt,
 };
 pub use session::{VoiceEvent, VoiceInput, VoiceState};
 pub use vad::{VoiceActivityDetector, VadEvent};
