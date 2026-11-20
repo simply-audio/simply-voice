@@ -1,5 +1,7 @@
 //! Voxtral provider — STT via realtime transcription WebSocket,
-//! TTS via speech generation REST API.
+//! TTS via speech generation REST API. Streaming TTS over the realtime
+//! WebSocket is [`VoxtralRealtimeTts`](super::VoxtralRealtimeTts)
+//! (`VoxtralProvider::realtime_tts`).
 //!
 //! Works with both Mistral's hosted API and local vLLM serving.
 //! Set `base_url` to point at your local vLLM instance.
@@ -17,9 +19,12 @@ use tracing::{debug, error, warn};
 use crate::audio::{Audio, AudioChunk};
 use crate::provider::{SttProvider, TtsProvider, Transcription, Voice};
 
-const DEFAULT_BASE_URL: &str = "https://api.mistral.ai";
+pub(crate) const DEFAULT_BASE_URL: &str = "https://api.mistral.ai";
 const DEFAULT_STT_MODEL: &str = "voxtral-mini-transcribe-realtime-2602";
-const DEFAULT_TTS_MODEL: &str = "voxtral-mini-tts-2603";
+/// Voxtral TTS 3: the REST endpoint and the realtime one
+/// ([`VoxtralRealtimeTts`](super::VoxtralRealtimeTts)) both serve it, and it
+/// takes Voxtral 2's voices as well as its own.
+pub(crate) const DEFAULT_TTS_MODEL: &str = "voxtral-mini-tts-3-0";
 
 pub struct VoxtralProvider {
     client: Client,
@@ -60,6 +65,14 @@ impl VoxtralProvider {
     pub fn with_tts_model(mut self, model: impl Into<String>) -> Self {
         self.tts_model = model.into();
         self
+    }
+
+    /// Realtime TTS on the same server, key and TTS model, behind
+    /// [`StreamingTts`](crate::StreamingTts).
+    pub fn realtime_tts(&self) -> super::VoxtralRealtimeTts {
+        super::VoxtralRealtimeTts::new(self.api_key.clone())
+            .with_base_url(self.base_url.clone())
+            .with_model(self.tts_model.clone())
     }
 
     /// HTTP base URL (e.g. "https://api.mistral.ai" or "http://localhost:8000").

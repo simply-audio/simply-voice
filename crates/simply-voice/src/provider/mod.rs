@@ -1,7 +1,7 @@
 mod stt;
 mod tts;
 mod realtime;
-mod streaming_tts;
+pub(crate) mod streaming_tts;
 
 pub use stt::{SttProvider, Transcription};
 pub use tts::{TtsProvider, Voice};
