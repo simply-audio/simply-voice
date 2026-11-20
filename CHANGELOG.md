@@ -6,6 +6,13 @@ it is folded in here on landing.
 
 ## Unreleased
 
+#### Gemini behind the streaming traits · 2026-11-20 19:38 · kmkkmxyq
+
+- **Gemini live transcription** (`GeminiRealtimeStt`, `GeminiProvider::realtime_stt()`): one Live API connection to `gemini-3.5-transcribe-live` per session, with interim text as `Partial` and a final per segment as `Final`. The server hears speech start, and an `EndOfTurn` from your own detector makes it finalize at once (hybrid detection). Connections are replaced between turns before Google's 10-minute limit, and a dropped connection keeps the open turn and sends its unfinalized audio again.
+- **Gemini streaming speech** (`GeminiRealtimeTts`, `GeminiProvider::realtime_tts()`): `gemini-3.8-flash-lite-tts`, one streamed request per sentence. Speech starts at the first complete sentence, before the flush, and a cancel drops the request in flight.
+- **`SentenceStreamingTts`** puts any provider that speaks one text per request with streamed audio (`SentenceTts`) behind `StreamingTts`. `SentenceChunker` cuts text into sentences as it arrives. `BatchStreamingTts` now runs on the same worker and behaves as before.
+- The batch Gemini paths (`generateContent`) and their models are unchanged.
+
 #### Streaming speech in, and Voxtral's realtime transcription with turn detection · 2026-11-20 18:44 · prznsspq
 
 - New: `StreamingStt`, a transcription session kept open while people speak. Send audio, plus `EndOfTurn` when your own voice detector hears the end. You get back speech starts, text (`Final` is appended and never revised, `Partial` replaces itself), eager ends and resumes, and exactly one `TurnEnded { reason }` per turn. `caps().ends_turns` says whether the provider ends turns itself.
