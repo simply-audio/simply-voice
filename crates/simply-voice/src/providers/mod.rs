@@ -17,6 +17,9 @@ mod realtime_ws;
 pub mod gemini;
 
 #[cfg(feature = "gemini")]
+pub mod gemini_realtime_stt;
+
+#[cfg(feature = "gemini")]
 pub mod gemini_realtime_tts;
 
 #[cfg(feature = "elevenlabs")]
@@ -42,6 +45,9 @@ pub use voxtral_realtime_stt::{VoxtralRealtimeStt, VoxtralTurnDetection};
 
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiProvider;
+
+#[cfg(feature = "gemini")]
+pub use gemini_realtime_stt::GeminiRealtimeStt;
 
 #[cfg(feature = "gemini")]
 pub use gemini_realtime_tts::GeminiRealtimeTts;

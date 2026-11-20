@@ -20,6 +20,7 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tracing::{debug, error, warn};
 
+use super::gemini_realtime_stt::GeminiRealtimeStt;
 use super::gemini_realtime_tts::GeminiRealtimeTts;
 use crate::audio::{Audio, AudioChunk};
 use crate::provider::{SttProvider, TtsProvider, Transcription, Voice};
@@ -96,6 +97,13 @@ impl GeminiProvider {
     pub fn with_tts_model(mut self, model: impl Into<String>) -> Self {
         self.tts_model = model.into();
         self
+    }
+
+    /// Live transcription with this provider's key: one Live API WebSocket
+    /// per session, model `gemini-3.5-transcribe-live` (not the batch STT
+    /// model), hybrid voice activity detection.
+    pub fn realtime_stt(&self) -> GeminiRealtimeStt {
+        GeminiRealtimeStt::new(self.api_key.clone())
     }
 
     /// Streaming TTS with this provider's key: one streamed request per

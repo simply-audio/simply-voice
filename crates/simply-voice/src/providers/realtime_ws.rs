@@ -40,6 +40,7 @@ pub(crate) async fn connect(url: &str, api_key: &str) -> Result<Ws> {
 
 /// Read until an event of type `want` and return it; an `error` event or a
 /// close fails. `label` names the endpoint in errors.
+#[cfg_attr(not(feature = "voxtral"), allow(dead_code))]
 pub(crate) async fn expect(ws: &mut Ws, want: &str, label: &str) -> Result<Value> {
     loop {
         match ws.next().await {
@@ -61,6 +62,7 @@ pub(crate) async fn expect(ws: &mut Ws, want: &str, label: &str) -> Result<Value
 
 /// The message of an `error` event (`error.message`, or a top-level
 /// `message`).
+#[cfg_attr(not(feature = "voxtral"), allow(dead_code))]
 pub(crate) fn error_message(msg: &Value) -> String {
     msg["error"]["message"]
         .as_str()

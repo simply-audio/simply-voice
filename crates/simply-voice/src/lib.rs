@@ -26,7 +26,7 @@ pub use providers::{
 };
 
 #[cfg(feature = "gemini")]
-pub use providers::{GeminiProvider, GeminiRealtimeTts};
+pub use providers::{GeminiProvider, GeminiRealtimeStt, GeminiRealtimeTts};
 
 #[cfg(feature = "elevenlabs")]
 pub use providers::ElevenLabsProvider;
