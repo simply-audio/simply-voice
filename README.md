@@ -8,13 +8,24 @@ The repo also ships `sv`, a small command line on top of the library: an easy wa
 
 ```
              ┌─ SttProvider ──── transcribe(chunk) · stream()
-simply-voice ├─ TtsProvider ──── synthesize(text, voice) · stream() · voices()
+             ├─ TtsProvider ──── synthesize(text, voice) · stream() · voices()
+simply-voice ├─ StreamingTts ─── open(cfg) → (format, text in, audio out)
              ├─ RealtimeProvider  connect(...)
              └─ VoiceActivityDetector  energy-based, emits speech start / end
 ```
 
 * **Callers depend on the traits**, never on a provider.
 * **Streaming is a channel pair**: send audio or text in, receive transcriptions or audio chunks out.
+
+## Streaming speech out
+
+`StreamingTts::open(StreamingTtsConfig::new(voice))` returns the session's `AudioFormat`, a `Sender<TtsInput>` and a `Receiver<TtsEvent>`.
+
+* **In**: `TtsInput::Text(delta)` as text is written (spaces included), `Flush` at the end of each utterance, `Cancel` to drop everything queued or playing.
+* **Out**: `TtsEvent::Audio(chunk)` in the declared format; one `UtteranceDone` or one `Error(why)` per `Flush`, in order; `Cancelled` per `Cancel`, after which nothing belongs to the dropped utterances.
+* **The session stays usable** after a cancel or an error. Dropping the sender speaks what is queued, then closes the receiver. Keep reading events: a full event channel holds the session up, cancels included.
+* **`VoxtralRealtimeTts`** (feature `voxtral`) streams for real over Mistral's realtime WebSocket: audio can start before the flush, and a cancel swaps in a spare connection opened in advance. Audio is float32 mono 24 kHz. `VoxtralProvider::realtime_tts()` makes one with the provider's key, server and model; `with_streaming_mode(VoxtralStreamingMode::LongForm)` trades latency for quality.
+* **`BatchStreamingTts::new(provider, format)`** puts any `TtsProvider` behind the trait: text waits for the flush, then is synthesized sentence by sentence; a cancel drops the in-flight `synthesize` future. `format` is what the provider returns: Voxtral REST f32 at 24 kHz, pocket-tts f32 at `PocketTtsProvider::sample_rate()`, Gemini and ElevenLabs PCM16 at 24 kHz. The encoding may differ (it is converted); the sample rate may not.
 
 ## Providers
 
@@ -23,7 +34,7 @@ simply-voice ├─ TtsProvider ──── synthesize(text, voice) · stream()
 | `kyutai` | `KyutaiSttProvider` | ✅ | | locally, candle |
 | `pocket-tts` | `PocketTtsProvider` | | ✅ | locally, candle |
 | `whisper` | `WhisperProvider` | ✅ | | locally, whisper.cpp |
-| `voxtral` | `VoxtralProvider` | ✅ | ✅ | remote API |
+| `voxtral` | `VoxtralProvider`, `VoxtralRealtimeTts` | ✅ | ✅ | remote API (Voxtral TTS 3 by default) |
 | `gemini` | `GeminiProvider` | ✅ | ✅ | remote API |
 | `elevenlabs` | `ElevenLabsProvider` | ✅ | ✅ | remote API |
 
