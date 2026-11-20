@@ -31,7 +31,7 @@ async-trait = { version = "0.1" }
 bytes = { version = "1" }
 futures = { version = "0.3" }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["macros", "sync", "time"] }
 tracing = { version = "0.1" }
 
 # Optional provider deps
