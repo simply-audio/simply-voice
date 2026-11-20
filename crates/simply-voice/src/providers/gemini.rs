@@ -337,25 +337,24 @@ fn extract_first_text(body: &Value) -> Option<String> {
         .find_map(|p| p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
 }
 
-/// Extract the first `inline_data` audio part from the first candidate's
-/// content. Returns (base64_data, mime_type).
+/// Extract the first part carrying `inline_data` audio across the candidates'
+/// content, skipping parts without it (text). Returns (base64_data, mime_type).
 fn extract_first_inline_audio(body: &Value) -> Option<(String, String)> {
-    let parts = body.get("candidates")?
+    body.get("candidates")?
         .as_array()?
         .iter()
         .filter_map(|c| c.get("content")?.get("parts")?.as_array())
-        .flatten();
-    for p in parts {
-        // Gemini may serialize the field as inline_data OR inlineData.
-        let inline = p.get("inline_data").or_else(|| p.get("inlineData"))?;
-        let data = inline.get("data")?.as_str()?.to_string();
-        let mime = inline.get("mime_type").or_else(|| inline.get("mimeType"))
-            .and_then(|m| m.as_str())
-            .unwrap_or("audio/pcm")
-            .to_string();
-        return Some((data, mime));
-    }
-    None
+        .flatten()
+        .find_map(|p| {
+            // Gemini may serialize the field as inline_data OR inlineData.
+            let inline = p.get("inline_data").or_else(|| p.get("inlineData"))?;
+            let data = inline.get("data")?.as_str()?.to_string();
+            let mime = inline.get("mime_type").or_else(|| inline.get("mimeType"))
+                .and_then(|m| m.as_str())
+                .unwrap_or("audio/pcm")
+                .to_string();
+            Some((data, mime))
+        })
 }
 
 /// Parse a sample rate hint from a MIME type like `audio/pcm;rate=24000`.
@@ -363,4 +362,23 @@ fn parse_sample_rate_from_mime(mime: &str) -> Option<u32> {
     mime.split(';')
         .find_map(|kv| kv.trim().strip_prefix("rate="))
         .and_then(|v| v.parse().ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn inline_audio_skips_a_leading_text_part() {
+        let body = json!({"candidates": [{"content": {"parts": [
+            {"text": "Here you go."},
+            {"inlineData": {"mimeType": "audio/pcm;rate=24000", "data": "AAEC"}},
+        ]}}]});
+        assert_eq!(
+            extract_first_inline_audio(&body),
+            Some(("AAEC".to_string(), "audio/pcm;rate=24000".to_string()))
+        );
+        let text_only = json!({"candidates": [{"content": {"parts": [{"text": "hi"}]}}]});
+        assert_eq!(extract_first_inline_audio(&text_only), None);
+    }
 }
