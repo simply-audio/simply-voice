@@ -6,6 +6,15 @@ it is folded in here on landing.
 
 ## Unreleased
 
+#### Gemini TTS audio behind a text part; voxtral builds on its own · 2026-11-20 18:22 · luwkloyn
+
+- Gemini TTS no longer fails when its response puts a text part before the audio: it takes the first part that carries audio.
+- The `voxtral` feature now builds without the caller's tokio turning on `macros` (the library turns it on itself).
+
+#### Barge-in stops a local pocket-tts synth · 2026-11-20 18:18 · zoztopnk
+
+- Dropping a `PocketTtsProvider::synthesize()` future (aborting the task that awaits it) now stops the synth within one frame and frees the model, so the next reply starts at once instead of waiting for the old one to finish. Dropping a `stream()`'s audio receiver does the same, mid-synth or while it waits for text. No API change.
+
 #### Speak and listen from the command line (`sv`) · 2026-11-07 07:58 · rurmptyr
 
 - New: `sv`, a small command line in this repo for people and agents. `sv say "…"` speaks in the configured voice (the Aurora voice by default) and returns when playback ends. `sv listen` waits for one spoken turn and prints it as one line of text. It exits 0 when it heard something, 1 when nobody spoke within `--timeout` (30 s by default), and 2 on an error. `sv devices [--pick]` lists the audio devices, or lets you choose them and saves the choice. `--input` / `--output` take a device number or part of its name.
