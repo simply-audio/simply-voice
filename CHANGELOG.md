@@ -6,6 +6,10 @@ it is folded in here on landing.
 
 ## Unreleased
 
+#### reqwest 0.13 for the HTTP providers · 2026-11-20 19:52 · klqmsuqs
+
+- Voxtral, Gemini and ElevenLabs now use reqwest 0.13 and still connect over native-tls, as they did before. An app that already uses reqwest 0.13 with native-tls (Lumina, through rmcp) gets no new packages in its lock, and no longer has the dependency tree that made `cargo update -p simply-voice` fail its resolve. reqwest 0.12 is still in the tree through hf-hub (kyutai, pocket-tts).
+
 #### Gemini behind the streaming traits · 2026-11-20 19:38 · kmkkmxyq
 
 - **Gemini live transcription** (`GeminiRealtimeStt`, `GeminiProvider::realtime_stt()`): one Live API connection to `gemini-3.5-transcribe-live` per session, with interim text as `Partial` and a final per segment as `Final`. The server hears speech start, and an `EndOfTurn` from your own detector makes it finalize at once (hybrid detection). Connections are replaced between turns before Google's 10-minute limit, and a dropped connection keeps the open turn and sends its unfinalized audio again.
