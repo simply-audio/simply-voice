@@ -6,6 +6,13 @@ it is folded in here on landing.
 
 ## Unreleased
 
+#### Streaming speech out, and Voxtral's realtime TTS · 2026-11-20 18:24 · snsytkrx
+
+- New: `StreamingTts`, speech that starts while the text is still being written. Open a session with a voice and get its audio format, a sender for text deltas (`Flush` ends an utterance, `Cancel` drops everything queued or playing) and a receiver for audio, one `UtteranceDone` or `Error` per utterance, and `Cancelled`. The session stays usable after a cancel or an error.
+- New: `VoxtralRealtimeTts` (feature `voxtral`, also `VoxtralProvider::realtime_tts()`) speaks over Mistral's realtime WebSocket: audio can start before the utterance is complete, a cancel takes effect at once by swapping in a spare connection opened in advance, and a failed generation reconnects without the caller noticing. Audio is float32 mono 24 kHz.
+- New: `BatchStreamingTts` puts any existing TTS provider (pocket-tts, Gemini, ElevenLabs, Voxtral REST) behind the same trait, synthesizing sentence by sentence after each flush; a cancel drops the synthesis in flight.
+- Changed: Voxtral TTS now defaults to Voxtral TTS 3 (`voxtral-mini-tts-3-0`), for the REST path too. It accepts the old voices as well as its own. Speech-to-text is unchanged.
+
 #### Gemini TTS audio behind a text part; voxtral builds on its own · 2026-11-20 18:22 · luwkloyn
 
 - Gemini TTS no longer fails when its response puts a text part before the audio: it takes the first part that carries audio.
