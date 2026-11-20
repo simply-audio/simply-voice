@@ -10,6 +10,7 @@ pub use provider::{
     Transcription, Voice,
     RealtimeConfig, RealtimeEvent, RealtimeInput,
     StreamingTts, StreamingTtsConfig, TtsEvent, TtsInput, TtsSession, BatchStreamingTts,
+    SentenceTts, SentenceStreamingTts, SentenceChunker, AudioStream,
     StreamingStt, StreamingSttConfig, SttCaps, SttEvent, SttInput, SttSession, TurnEnd,
     BatchStreamingStt,
 };

@@ -12,6 +12,6 @@ pub use streaming_stt::{
     TurnEnd,
 };
 pub use streaming_tts::{
-    split_sentences, BatchStreamingTts, StreamingTts, StreamingTtsConfig, TtsEvent, TtsInput,
-    TtsSession,
+    split_sentences, AudioStream, BatchStreamingTts, SentenceChunker, SentenceStreamingTts,
+    SentenceTts, StreamingTts, StreamingTtsConfig, TtsEvent, TtsInput, TtsSession,
 };
