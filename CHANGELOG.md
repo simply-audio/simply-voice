@@ -6,6 +6,18 @@ it is folded in here on landing.
 
 ## Unreleased
 
+#### Streaming speech in, and Voxtral's realtime transcription with turn detection · 2026-11-20 18:44 · prznsspq
+
+- New: `StreamingStt`, a transcription session kept open while people speak. Send audio, plus `EndOfTurn` when your own voice detector hears the end. You get back speech starts, text (`Final` is appended and never revised, `Partial` replaces itself), eager ends and resumes, and exactly one `TurnEnded { reason }` per turn. `caps().ends_turns` says whether the provider ends turns itself.
+- New: `VoxtralRealtimeStt` (feature `voxtral`, also `VoxtralProvider::realtime_stt()`) keeps one WebSocket to Mistral's realtime transcription open, with Mistral's turn detection.
+  - By default a turn can end 300 ms into a pause (Mistral's "Aggressive" values), and the text runs 240 ms behind the audio.
+  - Each turn's last words still reach it after the provider's end of turn.
+  - A dropped connection reconnects without the caller doing anything, and the audio sent meanwhile is kept.
+- New: `BatchStreamingStt` puts any existing STT provider behind the same trait. Audio that arrives while a turn is being transcribed is kept for the next turn, so speech during a transcription is no longer dropped.
+- New: `KyutaiSttProvider` implements `StreamingStt`, its end-of-turn detection ending the turns.
+- New: `VoiceActivityDetector::with_end_silence(duration)` sets how much silence ends speech; the default stays 500 ms. `process_silence()` ends speech when no audio arrives at all.
+- Changed: Voxtral speech-to-text now defaults to Voxtral Mini Transcribe Realtime 3 (`voxtral-mini-transcribe-realtime-3`), for the per-utterance `transcribe` too. `VoxtralProvider::local` keeps its own model.
+
 #### Streaming speech out, and Voxtral's realtime TTS · 2026-11-20 18:24 · snsytkrx
 
 - New: `StreamingTts`, speech that starts while the text is still being written. Open a session with a voice and get its audio format, a sender for text deltas (`Flush` ends an utterance, `Cancel` drops everything queued or playing) and a receiver for audio, one `UtteranceDone` or `Error` per utterance, and `Cancelled`. The session stays usable after a cancel or an error.
