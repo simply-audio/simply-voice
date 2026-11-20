@@ -62,11 +62,65 @@ impl VoiceActivityDetector {
         }
     }
 
+    /// How long the speaker must be quiet before [`VadEvent::SpeechEnd`];
+    /// 500 ms by default.
+    pub fn with_end_silence(mut self, silence: Duration) -> Self {
+        self.silence_duration_ms = silence.as_millis() as u64;
+        self
+    }
+
     /// Process a chunk of PCM16 samples. Returns a VAD event if a state transition occurred.
     pub fn process(&mut self, samples: &[i16]) -> Option<VadEvent> {
+        self.process_at(samples, Instant::now())
+    }
+
+    /// Account for a time with no audio at all, as silence: call it on a
+    /// timer when no chunk arrives. Speech ends once the end silence has
+    /// passed since the last loud chunk, as if quiet chunks had been fed
+    /// (they are not added to the utterance). Returns
+    /// [`VadEvent::SpeechEnd`] when that happens.
+    pub fn process_silence(&mut self) -> Option<VadEvent> {
+        self.silence_at(Instant::now())
+    }
+
+    fn silence_at(&mut self, now: Instant) -> Option<VadEvent> {
+        let quiet_for = now.duration_since(self.last_speech).as_millis();
+        match self.state {
+            State::Silence => None,
+            State::PossibleSpeech => {
+                if quiet_for >= self.onset_dip_ms as u128 {
+                    debug!("VAD: PossibleSpeech -> Silence (no audio)");
+                    self.transition(State::Silence, now);
+                    let onset = std::mem::take(&mut self.accumulated);
+                    self.push_pre_roll(now, onset);
+                }
+                None
+            }
+            State::Speech | State::PossibleSilence => {
+                if self.state == State::Speech {
+                    // The silence began after the last loud chunk.
+                    self.transition(State::PossibleSilence, self.last_speech);
+                }
+                if now.duration_since(self.state_start).as_millis() >= self.silence_duration_ms as u128 {
+                    Some(self.end_speech(now))
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn end_speech(&mut self, now: Instant) -> VadEvent {
+        let audio = std::mem::take(&mut self.accumulated);
+        self.transition(State::Silence, now);
+        self.pre_roll.clear();
+        info!("VAD: Speech ended ({} samples)", audio.len());
+        VadEvent::SpeechEnd(audio)
+    }
+
+    fn process_at(&mut self, samples: &[i16], now: Instant) -> Option<VadEvent> {
         let energy = Self::energy(samples);
         let is_speech = energy > self.energy_threshold;
-        let now = Instant::now();
         let elapsed = now.duration_since(self.state_start);
 
         match self.state {
@@ -108,7 +162,9 @@ impl VoiceActivityDetector {
             State::Speech => {
                 self.accumulated.extend_from_slice(samples);
 
-                if !is_speech {
+                if is_speech {
+                    self.last_speech = now;
+                } else {
                     debug!("VAD: Speech -> PossibleSilence");
                     self.transition(State::PossibleSilence, now);
                 }
@@ -119,14 +175,11 @@ impl VoiceActivityDetector {
 
                 if is_speech {
                     debug!("VAD: PossibleSilence -> Speech (resumed)");
+                    self.last_speech = now;
                     self.transition(State::Speech, now);
                     Some(VadEvent::SpeechChunk(samples.to_vec()))
                 } else if elapsed.as_millis() >= self.silence_duration_ms as u128 {
-                    let audio = std::mem::take(&mut self.accumulated);
-                    self.transition(State::Silence, now);
-                    self.pre_roll.clear();
-                    info!("VAD: Speech ended ({} samples)", audio.len());
-                    Some(VadEvent::SpeechEnd(audio))
+                    Some(self.end_speech(now))
                 } else {
                     None
                 }
@@ -170,5 +223,67 @@ impl VoiceActivityDetector {
 impl Default for VoiceActivityDetector {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const LOUD: [i16; 320] = [8_000; 320];
+    const QUIET: [i16; 320] = [0; 320];
+
+    fn ended(ev: Option<VadEvent>) -> bool {
+        matches!(ev, Some(VadEvent::SpeechEnd(_)))
+    }
+
+    /// Speech for 300 ms in 20 ms chunks from `t0`; returns the time after.
+    fn speak(vad: &mut VoiceActivityDetector, t0: Instant) -> Instant {
+        let mut started = false;
+        for i in 0..15 {
+            let t = t0 + Duration::from_millis(20 * i);
+            if let Some(VadEvent::SpeechStart) = vad.process_at(&LOUD, t) {
+                started = true;
+            }
+        }
+        assert!(started, "speech started");
+        t0 + Duration::from_millis(300)
+    }
+
+    #[test]
+    fn silence_without_audio_ends_speech_after_the_end_silence() {
+        let t0 = Instant::now();
+        let mut vad = VoiceActivityDetector::new().with_end_silence(Duration::from_millis(300));
+        let last = speak(&mut vad, t0) - Duration::from_millis(20);
+        assert!(vad.silence_at(last + Duration::from_millis(100)).is_none());
+        assert!(vad.silence_at(last + Duration::from_millis(250)).is_none());
+        let Some(VadEvent::SpeechEnd(audio)) = vad.silence_at(last + Duration::from_millis(300)) else {
+            panic!("speech ended");
+        };
+        assert_eq!(audio.len(), 15 * 320, "no samples added for the gap");
+        assert!(vad.silence_at(last + Duration::from_secs(2)).is_none(), "ends once");
+    }
+
+    #[test]
+    fn quiet_chunks_and_missing_audio_count_toward_the_same_silence() {
+        let t0 = Instant::now();
+        let mut vad = VoiceActivityDetector::new();
+        let after = speak(&mut vad, t0);
+        // 200 ms of quiet chunks, then nothing: 500 ms after the last loud chunk.
+        for i in 0..10 {
+            assert!(!ended(vad.process_at(&QUIET, after + Duration::from_millis(20 * i))));
+        }
+        assert!(vad.silence_at(after + Duration::from_millis(400)).is_none());
+        assert!(matches!(vad.silence_at(after + Duration::from_millis(500)), Some(VadEvent::SpeechEnd(_))));
+    }
+
+    #[test]
+    fn the_default_end_silence_is_unchanged() {
+        let t0 = Instant::now();
+        let mut vad = VoiceActivityDetector::new();
+        let after = speak(&mut vad, t0);
+        assert!(!ended(vad.process_at(&QUIET, after)));
+        assert!(!ended(vad.process_at(&QUIET, after + Duration::from_millis(480))));
+        assert!(matches!(vad.process_at(&QUIET, after + Duration::from_millis(500)), Some(VadEvent::SpeechEnd(_))));
     }
 }
