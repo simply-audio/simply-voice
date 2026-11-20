@@ -20,6 +20,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
@@ -210,6 +211,52 @@ fn tensor_to_f32_samples(audio: &candle::Tensor) -> Result<Vec<f32>> {
     Ok(audio.flatten_all()?.to_vec1::<f32>()?)
 }
 
+/// Sets its flag when dropped. The async `synthesize` future holds one, so a
+/// caller that drops or aborts that future (barge-in) tells the blocking synth
+/// to stop: work on a `spawn_blocking` thread is not cancelled by dropping the
+/// task awaiting it.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Run `job` on a blocking thread, handing it a `cancelled()` check that turns
+/// true once the returned future is dropped or aborted.
+async fn spawn_cancellable<T: Send + 'static>(
+    job: impl FnOnce(&dyn Fn() -> bool) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let cancel = Arc::new(AtomicBool::new(false));
+    // Dropped with this future, completed or not; once the blocking job has
+    // returned, the flag is read by nobody.
+    let _cancel_on_drop = CancelOnDrop(Arc::clone(&cancel));
+    tokio::task::spawn_blocking(move || job(&|| cancel.load(Ordering::Relaxed))).await?
+}
+
+/// Pull `chunks` one at a time into `sink`, checking `cancelled` before each.
+/// `generate_stream` computes a frame only when it is pulled, so a cancel
+/// stops generation within the chunk in flight. Returns `Ok(false)` if
+/// cancelled, `Ok(true)` once the iterator is exhausted; the first chunk or
+/// sink error ends the loop.
+fn drain_chunks<T>(
+    chunks: impl IntoIterator<Item = Result<T>>,
+    cancelled: impl Fn() -> bool,
+    mut sink: impl FnMut(T) -> Result<()>,
+) -> Result<bool> {
+    let mut chunks = chunks.into_iter();
+    loop {
+        if cancelled() {
+            return Ok(false);
+        }
+        match chunks.next() {
+            Some(chunk) => sink(chunk?)?,
+            None => return Ok(true),
+        }
+    }
+}
+
 /// Best available device: Metal when the feature is enabled and the device
 /// initializes, CPU otherwise.
 fn best_device() -> candle::Device {
@@ -246,7 +293,10 @@ impl Inner {
 ///
 /// The model lives behind one mutex: **only one `synthesize()` or `stream()`
 /// can run at a time**, and an open stream holds the lock until its text
-/// sender is dropped.
+/// sender or its audio receiver is dropped. Dropping a `synthesize()` future
+/// (or a stream's audio receiver) stops the synth within one
+/// `generate_stream` frame and releases the lock, so the next synth starts at
+/// once.
 pub struct PocketTtsProvider {
     inner: Arc<Mutex<Inner>>,
     default_voice: String,
@@ -378,17 +428,31 @@ impl TtsProvider for PocketTtsProvider {
         let inner = Arc::clone(&self.inner);
         let sample_rate = self.sample_rate;
 
-        let samples: Vec<f32> = tokio::task::spawn_blocking(move || -> Result<Vec<f32>> {
+        let samples: Vec<f32> = spawn_cancellable(move |cancelled| {
             let mut inner = inner.lock().expect("pocket-tts mutex poisoned");
+            // Dropped while queued behind another synth: don't start.
+            if cancelled() {
+                return Ok(Vec::new());
+            }
             inner.ensure_voice_state(&voice)?;
             // Split borrows: state from the cache, model taken separately.
             let Inner { model, voice_states } = &mut *inner;
             let state = &voice_states[&voice];
-            // [C, T] mono f32 tensor → raw samples.
-            let audio = model.generate(&text, state)?;
-            tensor_to_f32_samples(&audio)
+            // `model.generate` is this same loop without the cancel check.
+            // Each chunk is a [B, C, T] mono f32 tensor (one Mimi frame), so
+            // appending their samples concatenates along T.
+            let mut samples = Vec::new();
+            let chunks = model.generate_stream(&text, state);
+            let completed = drain_chunks(chunks, cancelled, |t| {
+                samples.extend(tensor_to_f32_samples(&t)?);
+                Ok(())
+            })?;
+            if completed && samples.is_empty() {
+                anyhow::bail!("pocket-tts: no audio generated");
+            }
+            Ok(samples)
         })
-        .await??;
+        .await?;
 
         Ok(Audio::from_f32_bytes(Self::f32_bytes(&samples), sample_rate))
     }
@@ -412,28 +476,39 @@ impl TtsProvider for PocketTtsProvider {
             let Inner { model, voice_states } = &mut *inner;
             let state = &voice_states[&voice];
 
-            while let Some(text) = text_rx.blocking_recv() {
+            // A dropped audio receiver cancels the stream: mid-synth between
+            // frames, and while idle waiting for text (so the lock is not held
+            // until the text sender goes too).
+            let cancelled = || audio_tx.is_closed();
+            let next_text = |text_rx: &mut mpsc::Receiver<String>| {
+                let recv = std::pin::pin!(text_rx.recv());
+                let closed = std::pin::pin!(audio_tx.closed());
+                match futures::executor::block_on(futures::future::select(recv, closed)) {
+                    futures::future::Either::Left((text, _)) => text,
+                    futures::future::Either::Right(((), _)) => None,
+                }
+            };
+
+            while let Some(text) = next_text(&mut text_rx) {
                 if text.trim().is_empty() {
                     continue;
                 }
                 let chunks = model.generate_stream(&text, state);
-                for chunk in chunks {
+                let sent = drain_chunks(chunks, cancelled, |t| {
                     // Each chunk is a [B, C, T] mono f32 tensor (one Mimi frame).
-                    match chunk.and_then(|t| tensor_to_f32_samples(&t)) {
-                        Ok(samples) => {
-                            let data = Self::f32_to_pcm16_bytes(&samples);
-                            if audio_tx.blocking_send(AudioChunk { data }).is_err() {
-                                debug!("pocket-tts stream: receiver dropped");
-                                return;
-                            }
-                        }
-                        Err(e) => {
-                            error!("pocket-tts stream chunk failed: {e:#}");
-                            break;
-                        }
-                    }
+                    let data = Self::f32_to_pcm16_bytes(&tensor_to_f32_samples(&t)?);
+                    // Fails only when the receiver is gone; the next
+                    // `cancelled()` check then ends the loop.
+                    let _ = audio_tx.blocking_send(AudioChunk { data });
+                    Ok(())
+                });
+                match sent {
+                    Ok(true) => {}
+                    Ok(false) => break,
+                    Err(e) => error!("pocket-tts stream chunk failed: {e:#}"),
                 }
             }
+            debug!("pocket-tts stream: closed");
         });
 
         Ok((text_tx, audio_rx))
@@ -471,6 +546,89 @@ mod tests {
         assert_eq!(stems, ["bob", "chris"]);
         // The embedding wins over the clip for the same stem.
         assert_eq!(lower_ext(&found[1].1), EMBEDDING_EXT);
+    }
+
+    /// Stands in for `generate_stream` under the model mutex: an endless,
+    /// lazy iterator of slow chunks that counts how many were pulled.
+    fn fake_synth(
+        model: &Mutex<()>,
+        pulled: &std::sync::atomic::AtomicUsize,
+        frames: Option<usize>,
+        cancelled: &dyn Fn() -> bool,
+    ) -> Result<Vec<usize>> {
+        let _model = model.lock().unwrap();
+        let chunks = (0..frames.unwrap_or(usize::MAX)).map(|i| {
+            pulled.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            Ok(i)
+        });
+        let mut out = Vec::new();
+        drain_chunks(chunks, cancelled, |i| {
+            out.push(i);
+            Ok(())
+        })?;
+        Ok(out)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn dropped_synth_stops_within_one_chunk_and_releases_the_model() {
+        use std::sync::atomic::AtomicUsize;
+        let model = Arc::new(Mutex::new(()));
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let task = tokio::spawn(spawn_cancellable({
+            let (model, pulled) = (Arc::clone(&model), Arc::clone(&pulled));
+            move |cancelled| fake_synth(&model, &pulled, None, cancelled)
+        }));
+        while pulled.load(Ordering::SeqCst) < 3 {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        // Barge-in: the caller aborts the task awaiting the synth.
+        task.abort();
+        let at_abort = pulled.load(Ordering::SeqCst);
+
+        // The next synth gets the model once the frame in flight is done.
+        let next = spawn_cancellable({
+            let (model, pulled) = (Arc::clone(&model), Arc::new(AtomicUsize::new(0)));
+            move |cancelled| fake_synth(&model, &pulled, Some(2), cancelled)
+        });
+        let out = tokio::time::timeout(std::time::Duration::from_secs(2), next)
+            .await
+            .expect("model mutex was not released")
+            .unwrap();
+        assert_eq!(out, [0, 1]);
+        let after = pulled.load(Ordering::SeqCst);
+        assert!(after <= at_abort + 1, "pulled {after} chunks, {at_abort} at abort");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn completed_synth_yields_every_chunk() {
+        let model = Arc::new(Mutex::new(()));
+        let pulled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let out = spawn_cancellable(move |cancelled| fake_synth(&model, &pulled, Some(5), cancelled))
+            .await
+            .unwrap();
+        assert_eq!(out, [0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn drain_chunks_stops_on_cancel_and_on_error() {
+        let mut seen = Vec::new();
+        let calls = std::cell::Cell::new(0);
+        // Cancelled before the third pull.
+        let cancelled = || {
+            calls.set(calls.get() + 1);
+            calls.get() > 2
+        };
+        let done = drain_chunks((0..10).map(Ok), cancelled, |i| {
+            seen.push(i);
+            Ok(())
+        })
+        .unwrap();
+        assert!(!done);
+        assert_eq!(seen, [0, 1]);
+
+        let chunks = vec![Ok(0), Err(anyhow::anyhow!("boom")), Ok(2)];
+        assert!(drain_chunks(chunks, || false, |_| Ok(())).is_err());
     }
 
     #[test]

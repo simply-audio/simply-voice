@@ -28,6 +28,7 @@ simply-voice ├─ TtsProvider ──── synthesize(text, voice) · stream()
 | `elevenlabs` | `ElevenLabsProvider` | ✅ | ✅ | remote API |
 
 * **`PocketTtsProvider::with_voice_dir`** adds custom voices: each `*.safetensors` embedding or `*.wav` clip in the directory is a voice named after its file stem.
+* **`PocketTtsProvider` runs one synth at a time.** Dropping a `synthesize()` future (aborting its task) or a `stream()`'s audio receiver stops the synth within one frame and frees the model for the next.
 * **`metal`** turns on Apple Silicon acceleration for the candle providers.
 * **`whisper`** needs cmake to build.
 * **No feature is on by default.**
