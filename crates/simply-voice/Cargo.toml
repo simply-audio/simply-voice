@@ -36,7 +36,7 @@ tracing = { version = "0.1" }
 
 # Optional provider deps
 whisper-rs = { version = "0.15.1", optional = true }
-reqwest = { version = "0.12", features = ["json", "rustls-tls", "multipart"], optional = true }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "native-tls", "http2", "charset", "system-proxy"], optional = true }
 base64 = { version = "0.22", optional = true }
 serde_json = { version = "1", optional = true }
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"], optional = true }
