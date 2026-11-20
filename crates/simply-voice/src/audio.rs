@@ -101,6 +101,22 @@ impl Audio {
         }
     }
 
+    /// The samples in `encoding`: the same bytes when it already is, else
+    /// converted (f32 is clamped to [-1, 1] on the way to PCM16).
+    pub fn to_encoding(&self, encoding: AudioEncoding) -> Bytes {
+        if self.format.encoding == encoding {
+            return self.data.clone();
+        }
+        match encoding {
+            AudioEncoding::F32 => self.to_f32_samples().iter().flat_map(|s| s.to_le_bytes()).collect(),
+            AudioEncoding::Pcm16 => self
+                .to_f32_samples()
+                .iter()
+                .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())
+                .collect(),
+        }
+    }
+
     /// Number of samples.
     pub fn sample_count(&self) -> usize {
         self.data.len() / self.format.bytes_per_sample()

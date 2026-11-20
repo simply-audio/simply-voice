@@ -31,7 +31,7 @@ async-trait = { version = "0.1" }
 bytes = { version = "1" }
 futures = { version = "0.3" }
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["macros", "sync", "time"] }
+tokio = { version = "1", features = ["sync", "time", "rt", "macros"] }
 tracing = { version = "0.1" }
 
 # Optional provider deps
@@ -56,4 +56,4 @@ sentencepiece-model = { version = "0.1.4", optional = true }
 hf-hub = { version = "0.4.3", optional = true }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }

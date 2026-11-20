@@ -9,6 +9,7 @@ pub use provider::{
     SttProvider, TtsProvider, RealtimeProvider,
     Transcription, Voice,
     RealtimeConfig, RealtimeEvent, RealtimeInput,
+    StreamingTts, StreamingTtsConfig, TtsEvent, TtsInput, TtsSession, BatchStreamingTts,
 };
 pub use session::{VoiceEvent, VoiceInput, VoiceState};
 pub use vad::{VoiceActivityDetector, VadEvent};
@@ -17,7 +18,7 @@ pub use vad::{VoiceActivityDetector, VadEvent};
 pub use providers::WhisperProvider;
 
 #[cfg(feature = "voxtral")]
-pub use providers::VoxtralProvider;
+pub use providers::{VoxtralProvider, VoxtralRealtimeTts, VoxtralStreamingMode};
 
 #[cfg(feature = "gemini")]
 pub use providers::GeminiProvider;

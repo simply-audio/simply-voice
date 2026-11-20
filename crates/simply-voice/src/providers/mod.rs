@@ -4,6 +4,9 @@ pub mod whisper;
 #[cfg(feature = "voxtral")]
 pub mod voxtral;
 
+#[cfg(feature = "voxtral")]
+pub mod voxtral_realtime_tts;
+
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
@@ -21,6 +24,9 @@ pub use whisper::WhisperProvider;
 
 #[cfg(feature = "voxtral")]
 pub use voxtral::VoxtralProvider;
+
+#[cfg(feature = "voxtral")]
+pub use voxtral_realtime_tts::{VoxtralRealtimeTts, VoxtralStreamingMode};
 
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiProvider;
