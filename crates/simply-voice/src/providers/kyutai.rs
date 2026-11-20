@@ -18,7 +18,11 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 use crate::audio::AudioChunk;
-use crate::provider::{SttProvider, Transcription};
+use crate::provider::streaming_stt::{require_rate, SESSION_CHANNEL};
+use crate::provider::{
+    SttCaps, SttEvent as StreamEvent, SttInput, SttProvider, SttSession, StreamingStt,
+    StreamingSttConfig, Transcription, TurnEnd,
+};
 
 /// Default HF repo for the 1B English/French streaming STT model.
 const DEFAULT_HF_REPO: &str = "kyutai/stt-1b-en_fr-candle";
@@ -454,6 +458,51 @@ impl KyutaiSttProvider {
         let samples = Self::pcm16_to_f32(data);
         Self::resample_linear(&samples, crate::audio::SAMPLE_RATE, MODEL_SAMPLE_RATE)
     }
+
+    /// Run one session on the blocking pool, holding the model for its whole
+    /// life (see the type-level doc): reset, step every input's audio
+    /// (`pcm16` picks it out; `None` carries none), and when the input ends,
+    /// flush the ASR delay. `emit` gets each step's events, and `done` with
+    /// the flush's; it returns false once its receiver is gone.
+    fn drive<T: Send + 'static>(
+        &self,
+        mut input: mpsc::Receiver<T>,
+        pcm16: impl Fn(T) -> Option<bytes::Bytes> + Send + 'static,
+        mut emit: impl FnMut(Vec<SttEvent>, bool) -> bool + Send + 'static,
+    ) {
+        let inner = Arc::clone(&self.inner);
+        tokio::task::spawn_blocking(move || {
+            let mut inner = inner.lock().expect("kyutai mutex poisoned");
+            if let Err(e) = inner.reset() {
+                error!("kyutai stream reset failed: {e:#}");
+                return;
+            }
+            // Resampled 24 kHz samples waiting to fill a full model frame.
+            let mut pending: Vec<f32> = Vec::new();
+            while let Some(item) = input.blocking_recv() {
+                let Some(data) = pcm16(item) else { continue };
+                pending.extend_from_slice(&Self::to_model_pcm(&data));
+                match inner.feed(&mut pending) {
+                    Ok(events) => {
+                        if !emit(events, false) {
+                            return;
+                        }
+                    }
+                    Err(e) => {
+                        error!("kyutai stream step failed: {e:#}");
+                        return;
+                    }
+                }
+            }
+            // Input ended: flush the ASR delay so the last words come out.
+            match inner.finish(std::mem::take(&mut pending)) {
+                Ok(events) => {
+                    emit(events, true);
+                }
+                Err(e) => error!("kyutai stream flush failed: {e:#}"),
+            }
+        });
+    }
 }
 
 #[async_trait]
@@ -495,76 +544,91 @@ impl SttProvider for KyutaiSttProvider {
     }
 
     async fn stream(&self) -> Result<(mpsc::Sender<AudioChunk>, mpsc::Receiver<Transcription>)> {
-        let (audio_tx, mut audio_rx) = mpsc::channel::<AudioChunk>(32);
+        let (audio_tx, audio_rx) = mpsc::channel::<AudioChunk>(32);
         let (text_tx, text_rx) = mpsc::channel::<Transcription>(32);
 
-        let inner = Arc::clone(&self.inner);
-
-        tokio::task::spawn_blocking(move || {
-            // The lock is held for the life of the stream — see the type-level
-            // doc comment about single-session use.
-            let mut inner = inner.lock().expect("kyutai mutex poisoned");
-            if let Err(e) = inner.reset() {
-                error!("kyutai stream reset failed: {e:#}");
-                return;
+        // Words of the utterance in progress, flushed at end of turn.
+        let mut utterance: Vec<String> = Vec::new();
+        // Forward events: each word as an interim result, and at end of turn
+        // (or when the input ends) the accumulated utterance as a final.
+        let emit = move |mut events: Vec<SttEvent>, done: bool| {
+            if done {
+                events.push(SttEvent::EndOfTurn);
             }
-
-            // Resampled 24 kHz samples waiting to fill a full model frame.
-            let mut pending: Vec<f32> = Vec::new();
-            // Words of the utterance in progress, flushed at end of turn.
-            let mut utterance: Vec<String> = Vec::new();
-            // Forward events: each word as an interim result, and at end of
-            // turn the accumulated utterance as a final. False once the
-            // receiver is gone.
-            let emit = |events: Vec<SttEvent>, utterance: &mut Vec<String>| {
-                for event in events {
-                    let msg = match event {
-                        SttEvent::Word(word) => {
-                            utterance.push(word.clone());
-                            Transcription {
-                                text: word,
-                                is_final: false,
-                            }
+            for event in events {
+                let msg = match event {
+                    SttEvent::Word(word) => {
+                        utterance.push(word.clone());
+                        Transcription {
+                            text: word,
+                            is_final: false,
                         }
-                        SttEvent::EndOfTurn if utterance.is_empty() => continue,
-                        SttEvent::EndOfTurn => Transcription {
-                            text: std::mem::take(utterance).join(" "),
-                            is_final: true,
-                        },
-                    };
-                    if text_tx.blocking_send(msg).is_err() {
-                        debug!("kyutai stream: receiver dropped");
-                        return false;
                     }
-                }
-                true
-            };
-
-            while let Some(chunk) = audio_rx.blocking_recv() {
-                pending.extend_from_slice(&Self::to_model_pcm(&chunk.data));
-                let events = match inner.feed(&mut pending) {
-                    Ok(events) => events,
-                    Err(e) => {
-                        error!("kyutai stream step failed: {e:#}");
-                        return;
-                    }
+                    SttEvent::EndOfTurn if utterance.is_empty() => continue,
+                    SttEvent::EndOfTurn => Transcription {
+                        text: std::mem::take(&mut utterance).join(" "),
+                        is_final: true,
+                    },
                 };
-                if !emit(events, &mut utterance) {
-                    return;
+                if text_tx.blocking_send(msg).is_err() {
+                    debug!("kyutai stream: receiver dropped");
+                    return false;
                 }
             }
-
-            // Sender dropped: flush the ASR delay, then whatever remains of
-            // the utterance as a final.
-            match inner.finish(std::mem::take(&mut pending)) {
-                Ok(mut events) => {
-                    events.push(SttEvent::EndOfTurn);
-                    emit(events, &mut utterance);
-                }
-                Err(e) => error!("kyutai stream flush failed: {e:#}"),
-            }
-        });
+            true
+        };
+        self.drive(audio_rx, |chunk| Some(chunk.data), emit);
 
         Ok((audio_tx, text_rx))
+    }
+}
+
+/// Kyutai behind [`StreamingStt`]: its end-of-turn head ends turns, so
+/// `ends_turns` is true. A turn opens with `SpeechStarted` at its first word
+/// (one ASR delay after the speech, so the caller's own detector is the
+/// faster barge-in trigger), each word is a `Final`, and the head's end of
+/// turn is `TurnEnded` with [`TurnEnd::Silence`]. `EndOfTurn` is ignored.
+/// Takes 16 kHz only. One session at a time per provider, as with `stream()`.
+#[async_trait]
+impl StreamingStt for KyutaiSttProvider {
+    fn caps(&self) -> SttCaps {
+        SttCaps { ends_turns: true, eager_end: false, sample_rate: crate::audio::SAMPLE_RATE }
+    }
+
+    async fn open(&self, cfg: StreamingSttConfig) -> Result<SttSession> {
+        require_rate(&cfg, crate::audio::SAMPLE_RATE, "Kyutai")?;
+        let (in_tx, in_rx) = mpsc::channel(SESSION_CHANNEL);
+        let (ev_tx, ev_rx) = mpsc::channel(SESSION_CHANNEL);
+        let mut in_turn = false;
+        let emit = move |events: Vec<SttEvent>, done: bool| {
+            let mut out = Vec::new();
+            for event in events {
+                match event {
+                    SttEvent::Word(word) if in_turn => out.push(StreamEvent::Final(format!(" {word}"))),
+                    SttEvent::Word(word) => {
+                        in_turn = true;
+                        out.extend([StreamEvent::SpeechStarted, StreamEvent::Final(word)]);
+                    }
+                    SttEvent::EndOfTurn if in_turn => {
+                        in_turn = false;
+                        out.push(StreamEvent::TurnEnded { reason: TurnEnd::Silence });
+                    }
+                    SttEvent::EndOfTurn => {}
+                }
+            }
+            if done && in_turn {
+                out.push(StreamEvent::TurnEnded { reason: TurnEnd::Closed });
+            }
+            out.into_iter().all(|ev| ev_tx.blocking_send(ev).is_ok())
+        };
+        self.drive(
+            in_rx,
+            |input| match input {
+                SttInput::Audio(chunk) => Some(chunk.data),
+                SttInput::EndOfTurn => None,
+            },
+            emit,
+        );
+        Ok((in_tx, ev_rx))
     }
 }

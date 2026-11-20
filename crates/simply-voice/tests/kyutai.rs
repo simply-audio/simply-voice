@@ -18,7 +18,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use simply_voice::{AudioChunk, KyutaiSttProvider, SttProvider};
+use simply_voice::{
+    AudioChunk, KyutaiSttProvider, StreamingStt, StreamingSttConfig, SttEvent, SttInput, SttProvider,
+    TurnEnd,
+};
 
 const SAMPLE_RATE: usize = simply_voice::audio::SAMPLE_RATE as usize;
 /// 20 ms of PCM16 bytes.
@@ -201,4 +204,58 @@ async fn closing_the_stream_flushes_the_last_word() {
     let (_gpu, kyutai) = kyutai();
     let finals = stream(&kyutai, &fixture(RUN_THE_TESTS.0), 0, false).await;
     assert_eq!(texts(&finals), RUN_THE_TESTS.1);
+}
+
+/// Behind `StreamingStt`, each utterance is one turn: `SpeechStarted`, its
+/// words as `Final`s, then `TurnEnded` from the end-of-turn head.
+#[tokio::test(flavor = "multi_thread")]
+async fn streaming_stt_turns_follow_the_end_of_turn_head() {
+    let (_gpu, kyutai) = kyutai();
+    assert!(kyutai.caps().ends_turns);
+
+    async fn turns(kyutai: &KyutaiSttProvider, pcm: &[u8], tail_ms: usize) -> Vec<(String, TurnEnd)> {
+        let (tx, mut rx) = kyutai.open(StreamingSttConfig::default()).await.unwrap();
+        let mut audio = pcm.to_vec();
+        audio.resize(pcm.len() + SAMPLE_RATE * 2 * tail_ms / 1000, 0);
+        let feeder = tokio::spawn(async move {
+            for frame in audio.chunks(FRAME_BYTES) {
+                tx.send(SttInput::Audio(AudioChunk::new(frame.to_vec()))).await.unwrap();
+            }
+            tx.send(SttInput::EndOfTurn).await.unwrap(); // ignored
+        });
+        let (mut out, mut text, mut open) = (Vec::new(), String::new(), false);
+        while let Some(ev) = rx.recv().await {
+            match ev {
+                SttEvent::SpeechStarted => {
+                    assert!(!open, "a turn opens once");
+                    open = true;
+                }
+                SttEvent::Final(t) => {
+                    assert!(open, "text inside a turn");
+                    text.push_str(&t);
+                }
+                SttEvent::TurnEnded { reason } => {
+                    assert!(open, "a turn ends once");
+                    open = false;
+                    out.push((norm(&std::mem::take(&mut text)), reason));
+                }
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+        feeder.await.unwrap();
+        out
+    }
+
+    let two = turns(&kyutai, &fixture(TWO_UTTERANCES.0), 3000).await;
+    let expected: Vec<(String, TurnEnd)> =
+        TWO_UTTERANCES.1.iter().map(|t| (t.to_string(), TurnEnd::Silence)).collect();
+    assert_eq!(two, expected);
+
+    // Cut off with no trailing silence: the flush pads silence, so the head
+    // usually ends the turn; if it doesn't, the close does. Either way the
+    // whole utterance is one turn.
+    let cut = turns(&kyutai, &fixture(RUN_THE_TESTS.0), 0).await;
+    assert_eq!(cut.len(), 1, "{cut:?}");
+    assert_eq!(cut[0].0, RUN_THE_TESTS.1[0]);
+    assert!(matches!(cut[0].1, TurnEnd::Silence | TurnEnd::Closed));
 }
