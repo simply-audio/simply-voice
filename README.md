@@ -27,6 +27,24 @@ simply-voice ├─ StreamingTts ─── open(cfg) → (format, text in, audio
 * **`VoxtralRealtimeTts`** (feature `voxtral`) streams for real over Mistral's realtime WebSocket: audio can start before the flush, and a cancel swaps in a spare connection opened in advance. Audio is float32 mono 24 kHz. `VoxtralProvider::realtime_tts()` makes one with the provider's key, server and model; `with_streaming_mode(VoxtralStreamingMode::LongForm)` trades latency for quality.
 * **`BatchStreamingTts::new(provider, format)`** puts any `TtsProvider` behind the trait: text waits for the flush, then is synthesized sentence by sentence; a cancel drops the in-flight `synthesize` future. `format` is what the provider returns: Voxtral REST f32 at 24 kHz, pocket-tts f32 at `PocketTtsProvider::sample_rate()`, Gemini and ElevenLabs PCM16 at 24 kHz. The encoding may differ (it is converted); the sample rate may not.
 
+## Streaming speech in
+
+`StreamingStt::open(StreamingSttConfig::new(sample_rate))` returns a `Sender<SttInput>` and a `Receiver<SttEvent>`, meant to stay open while people may speak.
+
+* **In**: `SttInput::Audio(chunk)`, PCM16 LE mono at the declared rate (16 kHz by default), and `EndOfTurn` when your own voice activity detector hears the end of a turn.
+* **Out**, grouped into turns: `SpeechStarted`; `Partial(text)`, replacing the previous partial; `Final(text)`, appended as is, never revised; `EagerEnd` and `Resumed`; then exactly one `TurnEnded { reason }` per turn, after all its text. `Error(why)` doesn't end the turn, and the session goes on.
+* **`caps().ends_turns`** says who ends the turn. A provider that does sends `SpeechStarted`, ends the turn itself and may ignore `EndOfTurn`, so keep sending audio, silence included. One that doesn't sends no `SpeechStarted` and answers every `EndOfTurn` with one `TurnEnded`, transcribing the audio sent since the previous one.
+* **Dropping the sender** finishes what is in flight (an open turn ends with `TurnEnd::Closed`), then closes the receiver. Keep reading events.
+* **`VoxtralRealtimeStt`** (feature `voxtral`) keeps one WebSocket to Mistral's realtime transcription open, with its turn detection:
+  * Mistral's "Aggressive" values by default (a turn can end 300 ms into a pause, 2.5 s at most), set with `with_turn_detection(VoxtralTurnDetection)`.
+  * A 240 ms streaming delay (`with_streaming_delay`).
+  * After the provider's turn end, the turn stays open one streaming delay for its last words.
+  * A dropped connection reconnects on its own. The audio sent meanwhile is kept, and an open turn ends with `TurnEnd::ConnectionLost`.
+  * `VoxtralProvider::realtime_stt()` makes one with the provider's key, server and model.
+* **`KyutaiSttProvider`** (feature `kyutai`) implements it too: its end-of-turn head ends the turns, and each word is a `Final`.
+* **`BatchStreamingStt::new(provider)`** puts any `SttProvider` behind the trait, with `ends_turns: false`. Each `EndOfTurn` is transcribed while audio keeps arriving, so nothing said during a transcription is lost.
+* **`VoiceActivityDetector::with_end_silence(duration)`** sets how much silence ends speech (500 ms by default). **`process_silence()`**, called on a timer, ends speech when no audio arrives at all.
+
 ## Providers
 
 | feature | provider | STT | TTS | runs |
@@ -34,7 +52,7 @@ simply-voice ├─ StreamingTts ─── open(cfg) → (format, text in, audio
 | `kyutai` | `KyutaiSttProvider` | ✅ | | locally, candle |
 | `pocket-tts` | `PocketTtsProvider` | | ✅ | locally, candle |
 | `whisper` | `WhisperProvider` | ✅ | | locally, whisper.cpp |
-| `voxtral` | `VoxtralProvider`, `VoxtralRealtimeTts` | ✅ | ✅ | remote API (Voxtral TTS 3 by default) |
+| `voxtral` | `VoxtralProvider`, `VoxtralRealtimeTts`, `VoxtralRealtimeStt` | ✅ | ✅ | remote API (Voxtral 3 models by default) |
 | `gemini` | `GeminiProvider` | ✅ | ✅ | remote API |
 | `elevenlabs` | `ElevenLabsProvider` | ✅ | ✅ | remote API |
 
