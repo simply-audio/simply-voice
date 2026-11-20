@@ -13,14 +13,17 @@ use futures_util::{SinkExt, StreamExt};
 use reqwest::Client;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, error, warn};
 
 use crate::audio::{Audio, AudioChunk};
 use crate::provider::{SttProvider, TtsProvider, Transcription, Voice};
 
 pub(crate) const DEFAULT_BASE_URL: &str = "https://api.mistral.ai";
-const DEFAULT_STT_MODEL: &str = "voxtral-mini-transcribe-realtime-2602";
+/// Voxtral Mini Transcribe Realtime 3: both `transcribe` (one connection per
+/// utterance, no session settings) and the streaming
+/// [`VoxtralRealtimeStt`](super::VoxtralRealtimeStt) use it.
+pub(crate) const DEFAULT_STT_MODEL: &str = "voxtral-mini-transcribe-realtime-3";
 /// Voxtral TTS 3: the REST endpoint and the realtime one
 /// ([`VoxtralRealtimeTts`](super::VoxtralRealtimeTts)) both serve it, and it
 /// takes Voxtral 2's voices as well as its own.
@@ -75,19 +78,17 @@ impl VoxtralProvider {
             .with_model(self.tts_model.clone())
     }
 
+    /// Realtime transcription with turn detection on the same server, key and
+    /// STT model, behind [`StreamingStt`](crate::StreamingStt).
+    pub fn realtime_stt(&self) -> super::VoxtralRealtimeStt {
+        super::VoxtralRealtimeStt::new(self.api_key.clone())
+            .with_base_url(self.base_url.clone())
+            .with_model(self.stt_model.clone())
+    }
+
     /// HTTP base URL (e.g. "https://api.mistral.ai" or "http://localhost:8000").
     fn http_url(&self, path: &str) -> String {
         format!("{}{path}", self.base_url.trim_end_matches('/'))
-    }
-
-    /// WebSocket base URL — derive from http base URL. Returns base only (no path).
-    fn ws_base(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        if base.starts_with("https://") {
-            base.replacen("https://", "wss://", 1)
-        } else {
-            base.replacen("http://", "ws://", 1)
-        }
     }
 }
 
@@ -131,45 +132,12 @@ impl SttProvider for VoxtralProvider {
     }
 
     async fn stream(&self) -> Result<(mpsc::Sender<AudioChunk>, mpsc::Receiver<Transcription>)> {
-        // Endpoint: /v1/audio/transcriptions/realtime with model as query param
-        let url = format!(
-            "{}/v1/audio/transcriptions/realtime?model={}",
-            self.ws_base(),
-            self.stt_model,
+        let url = super::voxtral_ws::ws_url(
+            &self.base_url,
+            &format!("/v1/audio/transcriptions/realtime?model={}", self.stt_model),
         );
-        // Log URL with redacted key
-        let log_url = if url.contains("api_key=") {
-            url.split("api_key=").next().unwrap_or(&url).to_string() + "api_key=***"
-        } else {
-            url.clone()
-        };
-        tracing::info!(url = %log_url, has_api_key = !self.api_key.is_empty(), "voxtral STT: connecting WS");
-
-        // Extract host from URL for the Host header
-        let host = url::Url::parse(&url)
-            .ok()
-            .and_then(|u| u.host_str().map(|h| {
-                match u.port() {
-                    Some(p) => format!("{h}:{p}"),
-                    None => h.to_string(),
-                }
-            }))
-            .unwrap_or_else(|| "api.mistral.ai".to_string());
-
-        let mut request = tokio_tungstenite::tungstenite::http::Request::builder()
-            .uri(&url)
-            .header("Host", &host)
-            .header("Connection", "Upgrade")
-            .header("Upgrade", "websocket")
-            .header("Sec-WebSocket-Version", "13")
-            .header("Sec-WebSocket-Key", tokio_tungstenite::tungstenite::handshake::client::generate_key());
-
-        if !self.api_key.is_empty() {
-            request = request.header("Authorization", format!("Bearer {}", self.api_key));
-        }
-
-        let request = request.body(())?;
-        let (ws_stream, _) = connect_async(request).await
+        tracing::info!(url = %url, has_api_key = !self.api_key.is_empty(), "voxtral STT: connecting WS");
+        let ws_stream = super::voxtral_ws::connect(&url, &self.api_key).await
             .map_err(|e| {
                 tracing::error!(error = %e, "voxtral STT: WS connect failed");
                 e

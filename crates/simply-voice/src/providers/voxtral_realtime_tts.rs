@@ -34,13 +34,11 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
-use tokio_tungstenite::tungstenite::client::IntoClientRequest;
-use tokio_tungstenite::tungstenite::http::header::{HeaderValue, AUTHORIZATION};
 use tokio_tungstenite::tungstenite::Message;
-use tokio_tungstenite::{connect_async, MaybeTlsStream, WebSocketStream};
 use tracing::{debug, info, warn};
 
 use super::voxtral::{DEFAULT_BASE_URL, DEFAULT_TTS_MODEL};
+use super::voxtral_ws::{self, error_message, Ws};
 use crate::audio::{AudioChunk, AudioEncoding, AudioFormat};
 use crate::provider::streaming_tts::SESSION_CHANNEL;
 use crate::provider::{StreamingTts, StreamingTtsConfig, TtsEvent, TtsInput, TtsSession};
@@ -119,15 +117,7 @@ impl VoxtralRealtimeTts {
     }
 
     fn url(&self) -> String {
-        let base = self.base_url.trim_end_matches('/');
-        let ws = if let Some(rest) = base.strip_prefix("https://") {
-            format!("wss://{rest}")
-        } else if let Some(rest) = base.strip_prefix("http://") {
-            format!("ws://{rest}")
-        } else {
-            base.to_string()
-        };
-        format!("{ws}/v1/audio/speech/realtime?model={}", self.model)
+        voxtral_ws::ws_url(&self.base_url, &format!("/v1/audio/speech/realtime?model={}", self.model))
     }
 }
 
@@ -169,8 +159,6 @@ impl StreamingTts for VoxtralRealtimeTts {
     }
 }
 
-type Ws = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
-
 /// How to open and configure one connection.
 struct Dial {
     url: String,
@@ -188,15 +176,12 @@ impl Dial {
     }
 
     async fn handshake(&self) -> Result<Ws> {
-        let mut req = self.url.as_str().into_client_request()?;
-        if !self.api_key.is_empty() {
-            req.headers_mut()
-                .insert(AUTHORIZATION, HeaderValue::from_str(&format!("Bearer {}", self.api_key))?);
-        }
-        let (mut ws, _) = connect_async(req).await.context("voxtral realtime TTS: connect")?;
-        expect(&mut ws, "session.created").await?;
+        let mut ws = voxtral_ws::connect(&self.url, &self.api_key)
+            .await
+            .context("voxtral realtime TTS: connect")?;
+        voxtral_ws::expect(&mut ws, "session.created", LABEL).await?;
         ws.send(Message::Text(self.update.clone().into())).await?;
-        expect(&mut ws, "session.updated").await?;
+        voxtral_ws::expect(&mut ws, "session.updated", LABEL).await?;
         debug!("voxtral realtime TTS: connection ready");
         Ok(ws)
     }
@@ -207,35 +192,8 @@ impl Dial {
     }
 }
 
-/// Read until an event of type `want`; an `error` event or a close fails.
-async fn expect(ws: &mut Ws, want: &str) -> Result<()> {
-    loop {
-        match ws.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let msg: Value = serde_json::from_str(&text)?;
-                match msg["type"].as_str() {
-                    Some(t) if t == want => return Ok(()),
-                    Some("error") => anyhow::bail!("voxtral realtime TTS: {}", error_message(&msg)),
-                    _ => {}
-                }
-            }
-            Some(Ok(Message::Close(frame))) => {
-                anyhow::bail!("voxtral realtime TTS: closed before {want}: {frame:?}")
-            }
-            Some(Ok(_)) => {}
-            Some(Err(e)) => return Err(e).context(format!("voxtral realtime TTS: waiting for {want}")),
-            None => anyhow::bail!("voxtral realtime TTS: closed before {want}"),
-        }
-    }
-}
-
-fn error_message(msg: &Value) -> String {
-    msg["error"]["message"]
-        .as_str()
-        .or(msg["message"].as_str())
-        .unwrap_or("unknown error")
-        .to_string()
-}
+/// Names this endpoint in errors.
+const LABEL: &str = "voxtral realtime TTS";
 
 fn append(text: &str) -> Message {
     Message::Text(json!({"type": "input_text.append", "text": text}).to_string().into())

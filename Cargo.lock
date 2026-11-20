@@ -3786,7 +3786,6 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
- "url",
  "whisper-rs",
 ]
 

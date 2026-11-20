@@ -7,6 +7,12 @@ pub mod voxtral;
 #[cfg(feature = "voxtral")]
 pub mod voxtral_realtime_tts;
 
+#[cfg(feature = "voxtral")]
+pub mod voxtral_realtime_stt;
+
+#[cfg(feature = "voxtral")]
+mod voxtral_ws;
+
 #[cfg(feature = "gemini")]
 pub mod gemini;
 
@@ -27,6 +33,9 @@ pub use voxtral::VoxtralProvider;
 
 #[cfg(feature = "voxtral")]
 pub use voxtral_realtime_tts::{VoxtralRealtimeTts, VoxtralStreamingMode};
+
+#[cfg(feature = "voxtral")]
+pub use voxtral_realtime_stt::{VoxtralRealtimeStt, VoxtralTurnDetection};
 
 #[cfg(feature = "gemini")]
 pub use gemini::GeminiProvider;

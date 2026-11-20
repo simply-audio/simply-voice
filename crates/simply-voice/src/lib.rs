@@ -20,7 +20,9 @@ pub use vad::{VoiceActivityDetector, VadEvent};
 pub use providers::WhisperProvider;
 
 #[cfg(feature = "voxtral")]
-pub use providers::{VoxtralProvider, VoxtralRealtimeTts, VoxtralStreamingMode};
+pub use providers::{
+    VoxtralProvider, VoxtralRealtimeStt, VoxtralRealtimeTts, VoxtralStreamingMode, VoxtralTurnDetection,
+};
 
 #[cfg(feature = "gemini")]
 pub use providers::GeminiProvider;
