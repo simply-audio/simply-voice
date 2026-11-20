@@ -7,10 +7,10 @@
 //!   `gemini-2.5-flash-preview-tts`) with `responseModalities: ["AUDIO"]`
 //!   and a prebuilt voice.
 //!
-//! Replaces the old `GeminiRealtimeProvider` (Multimodal Live API over
-//! WebSocket) — the new shape fits the `SttProvider` / `TtsProvider`
-//! traits so it slots into the same STT/TTS pipeline as Voxtral and
-//! ElevenLabs.
+//! The streaming paths have their own models and modules:
+//! [`GeminiProvider::realtime_stt`] (live transcription over the Live API,
+//! `gemini_realtime_stt`) and [`GeminiProvider::realtime_tts`] (one streamed
+//! request per sentence, `gemini_realtime_tts`).
 
 use anyhow::Result;
 use async_trait::async_trait;

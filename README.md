@@ -10,6 +10,7 @@ The repo also ships `sv`, a small command line on top of the library: an easy wa
              ┌─ SttProvider ──── transcribe(chunk) · stream()
              ├─ TtsProvider ──── synthesize(text, voice) · stream() · voices()
 simply-voice ├─ StreamingTts ─── open(cfg) → (format, text in, audio out)
+             ├─ StreamingStt ─── open(cfg) → (audio in, turn events out) · caps()
              ├─ RealtimeProvider  connect(...)
              └─ VoiceActivityDetector  energy-based, emits speech start / end
 ```
@@ -25,6 +26,8 @@ simply-voice ├─ StreamingTts ─── open(cfg) → (format, text in, audio
 * **Out**: `TtsEvent::Audio(chunk)` in the declared format; one `UtteranceDone` or one `Error(why)` per `Flush`, in order; `Cancelled` per `Cancel`, after which nothing belongs to the dropped utterances.
 * **The session stays usable** after a cancel or an error. Dropping the sender speaks what is queued, then closes the receiver. Keep reading events: a full event channel holds the session up, cancels included.
 * **`VoxtralRealtimeTts`** (feature `voxtral`) streams for real over Mistral's realtime WebSocket: audio can start before the flush, and a cancel swaps in a spare connection opened in advance. Audio is float32 mono 24 kHz. `VoxtralProvider::realtime_tts()` makes one with the provider's key, server and model; `with_streaming_mode(VoxtralStreamingMode::LongForm)` trades latency for quality.
+* **`GeminiRealtimeTts`** (feature `gemini`) speaks through Gemini's streaming TTS (`gemini-3.8-flash-lite-tts`), which takes one text per request. Text is cut into sentences as it arrives and each sentence is one streamed request, in order: the first starts before the flush, the flush sends the trailing fragment, a cancel drops the request in flight. Audio is PCM16 mono 24 kHz; prosody starts afresh at each sentence. `GeminiProvider::realtime_tts()` makes one with the provider's key; `with_style("casual, friendly")` sets one delivery style for every sentence.
+* **`SentenceStreamingTts::new(provider)`** does the same for any provider that speaks one text per request with streamed audio: implement `SentenceTts` (`format()`, `speak(text, voice) -> AudioStream`). `SentenceChunker` is the sentence cutter on its own.
 * **`BatchStreamingTts::new(provider, format)`** puts any `TtsProvider` behind the trait: text waits for the flush, then is synthesized sentence by sentence; a cancel drops the in-flight `synthesize` future. `format` is what the provider returns: Voxtral REST f32 at 24 kHz, pocket-tts f32 at `PocketTtsProvider::sample_rate()`, Gemini and ElevenLabs PCM16 at 24 kHz. The encoding may differ (it is converted); the sample rate may not.
 
 ## Streaming speech in
@@ -41,6 +44,11 @@ simply-voice ├─ StreamingTts ─── open(cfg) → (format, text in, audio
   * After the provider's turn end, the turn stays open one streaming delay for its last words.
   * A dropped connection reconnects on its own. The audio sent meanwhile is kept, and an open turn ends with `TurnEnd::ConnectionLost`.
   * `VoxtralProvider::realtime_stt()` makes one with the provider's key, server and model.
+* **`GeminiRealtimeStt`** (feature `gemini`) keeps one Live API WebSocket to `gemini-3.5-transcribe-live` open, with hybrid voice activity detection:
+  * The server hears speech start (`SpeechStarted`) and sends interim text (`Partial`) and a final per segment (`Final`).
+  * **Send `EndOfTurn`** when your detector hears the end of speech: the server finalizes at once and the turn ends with `TurnEnd::Requested`. Without it the server's own detector ends the turn, later.
+  * Connections last about 10 minutes. A new one is opened on the server's notice, or 9 minutes in (`with_rotate_after`), and swapped in between turns. A dropped connection reconnects on its own; an open turn stays open and its audio since the last final is sent again.
+  * `with_language_codes` and `with_custom_vocabulary` (speakers' names, jargon) go in the setup. `GeminiProvider::realtime_stt()` makes one with the provider's key.
 * **`KyutaiSttProvider`** (feature `kyutai`) implements it too: its end-of-turn head ends the turns, and each word is a `Final`.
 * **`BatchStreamingStt::new(provider)`** puts any `SttProvider` behind the trait, with `ends_turns: false`. Each `EndOfTurn` is transcribed while audio keeps arriving, so nothing said during a transcription is lost.
 * **`VoiceActivityDetector::with_end_silence(duration)`** sets how much silence ends speech (500 ms by default). **`process_silence()`**, called on a timer, ends speech when no audio arrives at all.
@@ -53,7 +61,7 @@ simply-voice ├─ StreamingTts ─── open(cfg) → (format, text in, audio
 | `pocket-tts` | `PocketTtsProvider` | | ✅ | locally, candle |
 | `whisper` | `WhisperProvider` | ✅ | | locally, whisper.cpp |
 | `voxtral` | `VoxtralProvider`, `VoxtralRealtimeTts`, `VoxtralRealtimeStt` | ✅ | ✅ | remote API (Voxtral 3 models by default) |
-| `gemini` | `GeminiProvider` | ✅ | ✅ | remote API |
+| `gemini` | `GeminiProvider`, `GeminiRealtimeStt`, `GeminiRealtimeTts` | ✅ | ✅ | remote API |
 | `elevenlabs` | `ElevenLabsProvider` | ✅ | ✅ | remote API |
 
 * **`PocketTtsProvider::with_voice_dir`** adds custom voices: each `*.safetensors` embedding or `*.wav` clip in the directory is a voice named after its file stem.

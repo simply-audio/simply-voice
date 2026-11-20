@@ -20,8 +20,10 @@
 //!   end-of-turn head) opens a turn with [`SttEvent::SpeechStarted`], may send
 //!   [`SttEvent::EagerEnd`] / [`SttEvent::Resumed`] while it is open (when
 //!   [`SttCaps::eager_end`]), and ends it on its own. It may ignore
-//!   `EndOfTurn`. The caller keeps sending audio, silence included: the
-//!   provider measures silence in the audio it receives.
+//!   `EndOfTurn` or use it to end the turn sooner (Gemini's hybrid detection
+//!   does), so a caller sends it whenever its detector hears an end. The
+//!   caller keeps sending audio, silence included: the provider measures
+//!   silence in the audio it receives.
 //! * A provider that **doesn't** sends no `SpeechStarted`: the caller's
 //!   detector owns the start of speech. Every `EndOfTurn` is answered, in
 //!   order, by exactly one `TurnEnded` (with
