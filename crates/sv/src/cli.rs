@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use simply_voice::TtsProvider;
 use tokio::sync::mpsc;
 
-use crate::audio::{self, MicCapture, Playback, SAMPLE_RATE, devices};
+use crate::audio::{self, ChannelSelection, MicCapture, Playback, SAMPLE_RATE, devices};
 use crate::config::{Config, ConfigSource};
 use crate::turn::{self, Heard, SttBackend, TurnEvent, TurnInput};
 use crate::voice;
@@ -81,6 +81,12 @@ pub async fn listen(mut config: Config, args: ListenArgs) -> Result<Listened> {
     if let Some(b) = args.backend {
         config.stt.backend = b;
     }
+    if args.wav.is_none() {
+        audio::validate_input_channels(
+            config.audio.input.as_deref(),
+            config.audio.input_channels.as_ref(),
+        )?;
+    }
     let t_load = Instant::now();
     let stt = config.stt.clone();
     let rt = tokio::runtime::Handle::current();
@@ -106,9 +112,13 @@ pub async fn listen(mut config: Config, args: ListenArgs) -> Result<Listened> {
             None
         }
         None => {
-            let mic = MicCapture::start(config.audio.input.as_deref(), move |frame| {
-                let _ = tx.send(TurnInput::Frame(frame));
-            })?;
+            let mic = MicCapture::start(
+                config.audio.input.as_deref(),
+                config.audio.input_channels.as_ref(),
+                move |frame| {
+                    let _ = tx.send(TurnInput::Frame(frame));
+                },
+            )?;
             eprintln!("listening on {}", mic.device_name());
             Some(mic)
         }
@@ -216,6 +226,17 @@ pub async fn say(mut config: Config, args: SayArgs) -> Result<()> {
     if let Some(v) = args.voice {
         config.tts.voice = v;
     }
+    // Open playback before loading TTS when speaking live, so an out-of-range
+    // channel selection fails immediately instead of after model load.
+    let playback = if args.out.is_none() {
+        Some(Playback::new(
+            config.audio.output.as_deref(),
+            config.audio.output_channels.as_ref(),
+        )?)
+    } else {
+        None
+    };
+
     let t_load = Instant::now();
     let tts_cfg = config.tts.clone();
     let tts = tokio::task::spawn_blocking(move || voice::load(&tts_cfg)).await??;
@@ -241,9 +262,16 @@ pub async fn say(mut config: Config, args: SayArgs) -> Result<()> {
         return Ok(());
     }
 
-    let playback = Playback::new(config.audio.output.as_deref())?;
+    let playback = playback.expect("opened above when --out is unset");
     let t = Instant::now();
-    let spoken = voice::speak(tts.as_ref(), tts.sample_rate(), playback.sink(), &args.text).await;
+    let spoken = voice::speak(
+        tts.as_ref(),
+        tts.sample_rate(),
+        playback.sink(),
+        playback.routing(),
+        &args.text,
+    )
+    .await;
     if let Some(first) = spoken.first_audio {
         println!("time to first audio: {} ms", ms(first));
     }
@@ -261,16 +289,20 @@ pub fn devices(source: &ConfigSource, pick: bool) -> Result<()> {
     let sections = [
         (
             "input",
+            "input_channels",
             devices::list_inputs()?,
             devices::resolve_input(config.audio.input.as_deref()),
+            config.audio.input_channels.as_ref(),
         ),
         (
             "output",
+            "output_channels",
             devices::list_outputs()?,
             devices::resolve_output(config.audio.output.as_deref()),
+            config.audio.output_channels.as_ref(),
         ),
     ];
-    for (kind, list, chosen) in sections {
+    for (kind, ch_key, list, chosen, configured_channels) in sections {
         println!("{}:", kind[..1].to_uppercase() + &kind[1..]);
         let chosen = chosen.map(|d| devices::display_name(&d));
         for (i, d) in list.iter().enumerate() {
@@ -280,16 +312,34 @@ pub fn devices(source: &ConfigSource, pick: bool) -> Result<()> {
                 ' '
             };
             let default = if d.is_default { '*' } else { ' ' };
-            println!("  {mark}{default} {:>2}. {}", i + 1, d.name);
+            match d.channels {
+                Some(ch) => println!("  {mark}{default} {:>2}. {} ({ch} ch)", i + 1, d.name),
+                None => println!("  {mark}{default} {:>2}. {}", i + 1, d.name),
+            }
+        }
+        if let Some(ch) = configured_channels {
+            println!("  channels: {ch}");
         }
         if let Err(e) = &chosen {
             println!("  ! {e}");
         }
         if pick {
-            let names: Vec<String> = list.into_iter().map(|d| d.name).collect();
-            if let Some(name) = ask_device(kind, &names)? {
-                Config::persist(&source.path, "audio", kind, name.as_str())?;
-                println!("  saved {kind} = {name:?} to {}", source.path.display());
+            let names: Vec<String> = list.iter().map(|d| d.name.clone()).collect();
+            if let Some(idx) = ask_device(kind, &names)? {
+                let picked = &list[idx];
+                Config::persist(&source.path, "audio", kind, picked.name.as_str())?;
+                println!(
+                    "  saved {kind} = {:?} to {}",
+                    picked.name,
+                    source.path.display()
+                );
+                if let Some(ch) = picked.channels
+                    && ch > 2
+                    && let Some(sel) = ask_channels(kind, ch)?
+                {
+                    Config::persist(&source.path, "audio", ch_key, sel.to_toml_value())?;
+                    println!("  saved {ch_key} = {sel} to {}", source.path.display());
+                }
             }
         }
     }
@@ -297,7 +347,7 @@ pub fn devices(source: &ConfigSource, pick: bool) -> Result<()> {
 }
 
 /// Prompt until the answer selects a device; empty keeps the current one.
-fn ask_device(kind: &str, names: &[String]) -> Result<Option<String>> {
+fn ask_device(kind: &str, names: &[String]) -> Result<Option<usize>> {
     loop {
         print!("  {kind} (number or name, Enter to keep): ");
         std::io::stdout().flush()?;
@@ -306,8 +356,30 @@ fn ask_device(kind: &str, names: &[String]) -> Result<Option<String>> {
             return Ok(None);
         }
         match devices::match_index(names, &line) {
-            Some(i) => return Ok(Some(names[i].clone())),
+            Some(i) => return Ok(Some(i)),
             None => println!("  no {kind} device matches {:?}", line.trim()),
+        }
+    }
+}
+
+/// Prompt until the answer selects valid channels for a multi-channel device;
+/// empty keeps the current setting.
+fn ask_channels(kind: &str, device_channels: u16) -> Result<Option<ChannelSelection>> {
+    loop {
+        print!(
+            "  {kind} channels (1..={device_channels}, e.g. 1,2 or 3-4, or all; Enter to keep): "
+        );
+        std::io::stdout().flush()?;
+        let mut line = String::new();
+        if std::io::stdin().read_line(&mut line)? == 0 || line.trim().is_empty() {
+            return Ok(None);
+        }
+        match line.trim().parse::<ChannelSelection>() {
+            Ok(sel) => match sel.resolve(device_channels) {
+                Ok(_) => return Ok(Some(sel)),
+                Err(e) => println!("  {e}"),
+            },
+            Err(e) => println!("  {e}"),
         }
     }
 }

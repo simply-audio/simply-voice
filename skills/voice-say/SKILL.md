@@ -56,6 +56,10 @@ If your session already gives you a `say` tool, use that instead.
   `say` prints nothing; the exit code says whether it spoke.
 - Both use the user's configured devices (`[audio]` in
   `~/.config/simply-voice/config.toml`); pass `--input <name>` /
-  `--output <name>` only if asked.
+  `--output <name>` or `--input-channels <spec>` / `--output-channels <spec>`
+  only if asked. Channel specs are 1-based: a single channel (`3`), a list
+  (`3,4`), a range (`3-4`), a combination (`1,3-4`), or `all`. The same
+  settings live under `[audio]` as `input_channels` and `output_channels`
+  (array of 1-based integers or spec string).
 - If `say` exits non-zero, carry on in text and mention that speech failed
   once; do not retry in a loop.

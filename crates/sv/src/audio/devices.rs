@@ -8,9 +8,10 @@
 use anyhow::{Result, anyhow, ensure};
 use cpal::traits::{DeviceTrait, HostTrait};
 
-/// One enumerated device, with the system-default flag.
+/// One enumerated device, with its channel count and system-default flag.
 pub struct DeviceInfo {
     pub name: String,
+    pub channels: Option<u16>,
     pub is_default: bool,
 }
 
@@ -26,7 +27,9 @@ pub fn list_inputs() -> Result<Vec<DeviceInfo>> {
     let devices = host
         .input_devices()
         .map_err(|e| anyhow!("enumerate input devices: {e}"))?;
-    Ok(to_infos(devices, default))
+    Ok(to_infos(devices, default, |d| {
+        d.default_input_config().ok().map(|c| c.channels())
+    }))
 }
 
 /// All output devices, marking the system default.
@@ -36,18 +39,26 @@ pub fn list_outputs() -> Result<Vec<DeviceInfo>> {
     let devices = host
         .output_devices()
         .map_err(|e| anyhow!("enumerate output devices: {e}"))?;
-    Ok(to_infos(devices, default))
+    Ok(to_infos(devices, default, |d| {
+        d.default_output_config().ok().map(|c| c.channels())
+    }))
 }
 
 fn to_infos(
     devices: impl Iterator<Item = cpal::Device>,
     default: Option<String>,
+    channels_of: impl Fn(&cpal::Device) -> Option<u16>,
 ) -> Vec<DeviceInfo> {
     devices
         .map(|d| {
             let name = display_name(&d);
+            let channels = channels_of(&d);
             let is_default = default.as_deref() == Some(name.as_str());
-            DeviceInfo { name, is_default }
+            DeviceInfo {
+                name,
+                channels,
+                is_default,
+            }
         })
         .collect()
 }

@@ -6,6 +6,8 @@
 //! [audio]
 //! input = "MacBook Pro Microphone"   # case-insensitive, exact then substring
 //! output = "headphones"
+//! input_channels = [1]               # optional 1-based channel list or spec ("1,2", "3-4", "all")
+//! output_channels = [3, 4]
 //! [stt]
 //! backend = "kyutai"                  # or "kyutai-batch", "whisper"
 //! [tts]
@@ -46,6 +48,12 @@ impl ConfigSource {
         }
         if let Some(output) = &self.audio.output {
             config.audio.output = Some(output.clone());
+        }
+        if let Some(ch) = &self.audio.input_channels {
+            config.audio.input_channels = Some(ch.clone());
+        }
+        if let Some(ch) = &self.audio.output_channels {
+            config.audio.output_channels = Some(ch.clone());
         }
         Ok(config)
     }
@@ -232,13 +240,15 @@ mod tests {
     }
 
     #[test]
-    fn source_overrides_audio_devices_only_when_set() {
+    fn source_overrides_audio_devices_and_channels_only_when_set() {
+        use crate::audio::ChannelSelection;
+
         let dir = std::env::temp_dir().join(format!("sv-src-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("config.toml");
         std::fs::write(
             &path,
-            "[audio]\ninput = \"file-in\"\noutput = \"file-out\"\n",
+            "[audio]\ninput = \"file-in\"\noutput = \"file-out\"\ninput_channels = [1]\noutput_channels = \"3-4\"\n",
         )
         .unwrap();
         let source = ConfigSource {
@@ -246,10 +256,21 @@ mod tests {
             audio: AudioConfig {
                 input: Some("flag-in".into()),
                 output: None,
+                input_channels: None,
+                output_channels: Some("5,6".parse().unwrap()),
             },
         };
         let config = source.load().unwrap();
         assert_eq!(config.audio.input.as_deref(), Some("flag-in"));
         assert_eq!(config.audio.output.as_deref(), Some("file-out"));
+        assert_eq!(
+            config.audio.input_channels,
+            Some(ChannelSelection::Channels(vec![1]))
+        );
+        assert_eq!(
+            config.audio.output_channels,
+            Some(ChannelSelection::Channels(vec![5, 6]))
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

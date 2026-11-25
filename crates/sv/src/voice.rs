@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use simply_voice::{PocketTtsProvider, TtsProvider};
 use tokio::sync::mpsc;
 
+use crate::audio::{OutputRouting, route_mono_to_channels};
+
 /// How often [`speak`] checks whether the speaker has gone quiet.
 const TICK: Duration = Duration::from_millis(40);
 
@@ -71,10 +73,14 @@ pub struct Spoken {
 /// quiet. Synthesis streams: each PCM16 chunk at `sample_rate` is appended as
 /// it arrives, so audio starts after the first chunk rather than the whole
 /// sentence, and the next sentence synthesises while this one plays.
+///
+/// When `routing` is `Some`, each mono chunk is expanded into an interleaved
+/// `device_channels`-channel buffer with audio on `target_channels` only.
 pub async fn speak(
     tts: &dyn TtsProvider,
     sample_rate: u32,
     sink: &rodio::Sink,
+    routing: Option<&OutputRouting>,
     sentences: &[String],
 ) -> Spoken {
     let t0 = Instant::now();
@@ -88,15 +94,20 @@ pub async fn speak(
             }
         };
         while let Some(chunk) = chunks.recv().await {
-            let pcm = chunk
+            let mono: Vec<f32> = chunk
                 .data
                 .chunks_exact(2)
-                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0);
-            sink.append(rodio::buffer::SamplesBuffer::new(
-                1,
-                sample_rate,
-                pcm.collect::<Vec<_>>(),
-            ));
+                .map(|b| i16::from_le_bytes([b[0], b[1]]) as f32 / 32768.0)
+                .collect();
+            let buffer = match routing {
+                Some(r) => rodio::buffer::SamplesBuffer::new(
+                    r.device_channels,
+                    sample_rate,
+                    route_mono_to_channels(&mono, r.device_channels, &r.target_channels),
+                ),
+                None => rodio::buffer::SamplesBuffer::new(1, sample_rate, mono),
+            };
+            sink.append(buffer);
             spoken.first_audio.get_or_insert_with(|| t0.elapsed());
         }
     }
@@ -180,7 +191,7 @@ mod tests {
         let (sink, output) = rodio::Sink::new_idle();
         drain_in_real_time(output);
         let sentences = ["one", "", "two"].map(String::from);
-        let spoken = speak(&tts, 24_000, &sink, &sentences).await;
+        let spoken = speak(&tts, 24_000, &sink, None, &sentences).await;
         assert_eq!(
             *tts.said.lock().unwrap(),
             ["one", "two"],
@@ -192,6 +203,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn speaks_routed_to_selected_output_channels() {
+        let tts = FakeTts::default();
+        let (sink, output) = rodio::Sink::new_idle();
+        drain_in_real_time(output);
+        let routing = OutputRouting {
+            device_channels: 4,
+            target_channels: vec![2, 3],
+        };
+        let sentences = ["routed".to_string()];
+        let spoken = speak(&tts, 24_000, &sink, Some(&routing), &sentences).await;
+        assert_eq!(*tts.said.lock().unwrap(), ["routed"]);
+        assert!(spoken.first_audio.is_some());
+        assert!(spoken.failed.is_empty());
+        assert!(sink.empty());
+    }
+
+    #[tokio::test]
     async fn a_failed_sentence_is_reported_and_the_rest_still_play() {
         let tts = FakeTts {
             fail: Arc::new(Mutex::new(1)),
@@ -200,7 +228,7 @@ mod tests {
         let (sink, output) = rodio::Sink::new_idle();
         drain_in_real_time(output);
         let sentences = ["bad", "good"].map(String::from);
-        let spoken = speak(&tts, 24_000, &sink, &sentences).await;
+        let spoken = speak(&tts, 24_000, &sink, None, &sentences).await;
         assert_eq!(*tts.said.lock().unwrap(), ["good"]);
         assert_eq!(spoken.failed.len(), 1);
         assert!(spoken.failed[0].contains("bad"), "{:?}", spoken.failed);

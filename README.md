@@ -90,7 +90,7 @@ sv devices [--pick]              list audio devices, or choose and save them
 
 * **Build**: `cargo build --release -p simply-voice-cli`, giving `target/release/sv`.
 * **`sv listen` exits** 0 with the transcript on stdout, 1 when nobody started speaking within `--timeout` (30 s), 2 on an error.
-* **Devices**: `--input` / `--output` on every command take a number from `sv devices` or part of a device name.
+* **Devices and channels**: `--input` / `--output` on every command take a number from `sv devices` or part of a device name. On multi-channel devices, `--input-channels` / `--output-channels` take a 1-based spec (`3`, `3,4`, `3-4`, `1,3-4`, or `all`); the same settings can be saved in `[audio]` as `input_channels` / `output_channels`.
 * **Config**: `~/.config/simply-voice/config.toml`, sections `[audio]`, `[stt]`, `[tts]`; unknown keys are ignored.
 * **For agents**: the `voice-say` skill in `skills/voice-say` wraps `sv say` and `sv listen`.
 

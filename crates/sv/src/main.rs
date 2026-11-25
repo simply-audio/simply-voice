@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use simply_voice_cli::audio::AudioConfig;
+use simply_voice_cli::audio::{AudioConfig, ChannelSelection};
 use simply_voice_cli::cli::{self, EXIT_ERROR, EXIT_TIMEOUT, Listened};
 use simply_voice_cli::config::{Config, ConfigSource};
 
@@ -22,6 +22,14 @@ struct Cli {
     /// Output device, same matching; overrides `[audio] output`.
     #[arg(long, global = true)]
     output: Option<String>,
+    /// Input channel(s), 1-based: e.g. 1, 1,2, 3-4, 1,3-4, or all; overrides
+    /// `[audio] input_channels`.
+    #[arg(long, global = true)]
+    input_channels: Option<ChannelSelection>,
+    /// Output channel(s), 1-based: e.g. 3, 3,4, 3-4, 1,3-4, or all; overrides
+    /// `[audio] output_channels`.
+    #[arg(long, global = true)]
+    output_channels: Option<ChannelSelection>,
     #[command(subcommand)]
     command: Command,
 }
@@ -68,6 +76,8 @@ async fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         audio: AudioConfig {
             input: cli.input,
             output: cli.output,
+            input_channels: cli.input_channels,
+            output_channels: cli.output_channels,
         },
     };
     match cli.command {

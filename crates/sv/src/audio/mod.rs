@@ -11,7 +11,10 @@
 //! lives on its own thread for the life of the [`Playback`], while the `Sink`
 //! (which IS `Send`) is handed back to the caller.
 
+pub mod channels;
 pub mod devices;
+
+pub use channels::{ChannelSelection, route_mono_to_channels};
 
 use std::path::Path;
 use std::thread;
@@ -38,6 +41,27 @@ pub struct AudioConfig {
     pub input: Option<String>,
     /// Output device name, same matching; unset = the system default.
     pub output: Option<String>,
+    /// Input channel(s) to capture (1-based); unset = all channels mixed.
+    pub input_channels: Option<ChannelSelection>,
+    /// Output channel(s) to route speech to (1-based); unset = channels 1–2.
+    pub output_channels: Option<ChannelSelection>,
+}
+
+/// Validate that `channels` (if set) fits within the resolved input device's
+/// channel count, without opening the mic stream.
+pub fn validate_input_channels(
+    device: Option<&str>,
+    channels: Option<&ChannelSelection>,
+) -> Result<()> {
+    let Some(sel) = channels else {
+        return Ok(());
+    };
+    let device = devices::resolve_input(device)?;
+    let config = device
+        .default_input_config()
+        .context("default input config")?;
+    sel.resolve(config.channels())?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -52,11 +76,13 @@ pub struct MicCapture {
 }
 
 impl MicCapture {
-    /// Start capturing from the named input device (`None` = system default).
-    /// `on_frame` receives mono PCM16 at [`SAMPLE_RATE`] on the realtime audio
-    /// thread, so it must not block — send it into a channel.
+    /// Start capturing from the named input device (`None` = system default),
+    /// mixing only `channels` (`None` = all channels) to mono PCM16 at
+    /// [`SAMPLE_RATE`]. `on_frame` runs on the realtime audio thread, so it
+    /// must not block — send it into a channel.
     pub fn start(
         device: Option<&str>,
+        channels: Option<&ChannelSelection>,
         on_frame: impl FnMut(Vec<i16>) + Send + 'static,
     ) -> Result<Self> {
         let device = devices::resolve_input(device)?;
@@ -66,9 +92,19 @@ impl MicCapture {
             .context("default input config")?;
         let sample_format = config.sample_format();
         let rate = config.sample_rate().0;
-        let channels = config.channels();
+        let device_channels = config.channels();
+        let selected: Vec<usize> = match channels {
+            Some(sel) => sel.resolve(device_channels)?,
+            None => (0..device_channels as usize).collect(),
+        };
         let stream_config: StreamConfig = config.into();
-        tracing::info!(device = %name, rate, channels, "mic capture starting");
+        tracing::info!(
+            device = %name,
+            rate,
+            channels = device_channels,
+            selected = ?selected,
+            "mic capture starting"
+        );
 
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let (ready_tx, ready_rx) = std::sync::mpsc::channel::<Result<()>>();
@@ -79,7 +115,12 @@ impl MicCapture {
                 SampleFormat::F32 => device.build_input_stream(
                     &stream_config,
                     move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                        on_frame(to_pcm16(data.iter().copied(), channels, rate))
+                        on_frame(to_pcm16(
+                            data.iter().copied(),
+                            device_channels,
+                            &selected,
+                            rate,
+                        ))
                     },
                     err_fn,
                     None,
@@ -89,7 +130,8 @@ impl MicCapture {
                     move |data: &[i16], _: &cpal::InputCallbackInfo| {
                         on_frame(to_pcm16(
                             data.iter().map(|&s| s as f32 / 32768.0),
-                            channels,
+                            device_channels,
+                            &selected,
                             rate,
                         ))
                     },
@@ -101,7 +143,8 @@ impl MicCapture {
                     move |data: &[u16], _: &cpal::InputCallbackInfo| {
                         on_frame(to_pcm16(
                             data.iter().map(|&s| (s as i32 - 32768) as f32 / 32768.0),
-                            channels,
+                            device_channels,
+                            &selected,
                             rate,
                         ))
                     },
@@ -154,15 +197,23 @@ impl Drop for MicCapture {
     }
 }
 
-/// Interleaved samples in -1..1 at `rate` → mono PCM16 at [`SAMPLE_RATE`].
-fn to_pcm16(data: impl Iterator<Item = f32>, channels: u16, rate: u32) -> Vec<i16> {
+/// Interleaved samples in -1..1 at `rate` → mono PCM16 at [`SAMPLE_RATE`],
+/// averaging only the 0-based `selected_channels` from each `channels`-wide
+/// frame.
+fn to_pcm16(
+    data: impl Iterator<Item = f32>,
+    channels: u16,
+    selected_channels: &[usize],
+    rate: u32,
+) -> Vec<i16> {
     let data: Vec<f32> = data.collect();
     let mono: Vec<f32> = if channels <= 1 {
         data
     } else {
         let ch = channels as usize;
-        data.chunks(ch)
-            .map(|f| f.iter().sum::<f32>() / ch as f32)
+        let denom = selected_channels.len().max(1) as f32;
+        data.chunks_exact(ch)
+            .map(|f| selected_channels.iter().map(|&idx| f[idx]).sum::<f32>() / denom)
             .collect()
     };
     f32_to_pcm16(&resample_linear(&mono, rate, SAMPLE_RATE))
@@ -228,9 +279,11 @@ pub fn read_wav(path: &Path) -> Result<Vec<i16>> {
                 .collect::<Result<_, _>>()?
         }
     };
+    let all: Vec<usize> = (0..spec.channels as usize).collect();
     Ok(to_pcm16(
         samples.into_iter(),
         spec.channels,
+        &all,
         spec.sample_rate,
     ))
 }
@@ -256,36 +309,69 @@ pub fn write_wav(path: &Path, audio: &Audio) -> Result<()> {
 // Speaker playback
 // ---------------------------------------------------------------------------
 
+/// Explicit mono-to-multichannel output routing resolved against a device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputRouting {
+    /// Total channel count of the output device.
+    pub device_channels: u16,
+    /// 0-based output channel indices that receive the mono speech signal.
+    pub target_channels: Vec<usize>,
+}
+
 /// Speaker output. The `!Send` rodio `OutputStream` is owned by a dedicated
 /// thread; the sink is handed back.
 pub struct Playback {
     sink: rodio::Sink,
+    routing: Option<OutputRouting>,
     stream_stop: std::sync::mpsc::Sender<()>,
 }
 
 impl Playback {
-    /// Open the named output device (`None` = system default). An unmatched
-    /// name falls back to the default with a warning so playback keeps working.
-    pub fn new(device: Option<&str>) -> Result<Self> {
-        let device = device.and_then(|q| {
-            devices::resolve_output(Some(q))
-                .inspect_err(|e| tracing::warn!(error = %e, "falling back to the default output"))
-                .ok()
-        });
-        let name = match &device {
-            Some(d) => devices::display_name(d),
-            None => devices::resolve_output(None)
-                .map(|d| devices::display_name(&d))
-                .unwrap_or_else(|_| "<unknown>".into()),
+    /// Open the named output device (`None` = system default) and validate
+    /// `channels` against its channel count. An unmatched device name falls
+    /// back to the default with a warning so playback keeps working.
+    pub fn new(device: Option<&str>, channels: Option<&ChannelSelection>) -> Result<Self> {
+        let resolved = device
+            .and_then(|q| {
+                devices::resolve_output(Some(q))
+                    .inspect_err(
+                        |e| tracing::warn!(error = %e, "falling back to the default output"),
+                    )
+                    .ok()
+            })
+            .or_else(|| devices::resolve_output(None).ok());
+
+        let (name, default_config, routing) = match &resolved {
+            Some(d) => {
+                let name = devices::display_name(d);
+                let cfg = d.default_output_config().context("default output config")?;
+                let routing = match channels {
+                    Some(sel) => Some(OutputRouting {
+                        device_channels: cfg.channels(),
+                        target_channels: sel.resolve(cfg.channels())?,
+                    }),
+                    None => None,
+                };
+                (name, Some(cfg), routing)
+            }
+            None => {
+                if channels.is_some() {
+                    return Err(anyhow!(
+                        "no default output device available to route channels"
+                    ));
+                }
+                ("<unknown>".into(), None, None)
+            }
         };
-        tracing::info!(device = %name, "playback opening");
+        tracing::info!(device = %name, routing = ?routing, "playback opening");
 
         let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
         let (sink_tx, sink_rx) = std::sync::mpsc::channel::<Result<rodio::Sink>>();
         thread::spawn(move || {
-            let pair = match &device {
-                Some(d) => rodio::OutputStream::try_from_device(d),
-                None => rodio::OutputStream::try_default(),
+            let pair = match (&resolved, default_config) {
+                (Some(d), Some(cfg)) => rodio::OutputStream::try_from_device_config(d, cfg),
+                (Some(d), None) => rodio::OutputStream::try_from_device(d),
+                (None, _) => rodio::OutputStream::try_default(),
             };
             let (stream, handle) = match pair {
                 Ok(pair) => pair,
@@ -311,6 +397,7 @@ impl Playback {
             .context("rodio thread died before handing back a sink")??;
         Ok(Self {
             sink,
+            routing,
             stream_stop: stop_tx,
         })
     }
@@ -318,6 +405,12 @@ impl Playback {
     /// The shared sink [`crate::voice::speak`] appends to.
     pub fn sink(&self) -> &rodio::Sink {
         &self.sink
+    }
+
+    /// Explicit output channel routing, when `--output-channels` /
+    /// `[audio] output_channels` is configured.
+    pub fn routing(&self) -> Option<&OutputRouting> {
+        self.routing.as_ref()
     }
 }
 
@@ -336,9 +429,20 @@ mod tests {
     fn stereo_48k_downmixes_and_resamples_to_16k_mono() {
         // 30 ms of stereo 48 kHz: left 0.5, right -0.5 → mono 0.
         let data: Vec<f32> = (0..1440).flat_map(|_| [0.5, -0.5]).collect();
-        let out = to_pcm16(data.into_iter(), 2, 48_000);
+        let out = to_pcm16(data.into_iter(), 2, &[0, 1], 48_000);
         assert_eq!(out.len(), 480);
         assert!(out.iter().all(|&s| s == 0));
+    }
+
+    #[test]
+    fn multichannel_input_extracts_only_selected_channels() {
+        // 4-channel 16 kHz: only channel 3 (index 2) carries 0.5; other channels
+        // are silent or loud noise. Selecting channel 3 keeps full 0.5 level.
+        let data: Vec<f32> = (0..160).flat_map(|_| [-0.9, 0.0, 0.5, 0.0]).collect();
+        let out = to_pcm16(data.into_iter(), 4, &[2], 16_000);
+        assert_eq!(out.len(), 160);
+        let expected = (0.5 * 32767.0) as i16;
+        assert!(out.iter().all(|&s| s == expected));
     }
 
     #[test]
