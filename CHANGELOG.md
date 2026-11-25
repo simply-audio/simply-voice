@@ -6,6 +6,12 @@ it is folded in here on landing.
 
 ## Unreleased
 
+#### Multi-channel audio routing in `sv` and `voice-say` · 2026-11-25 21:14 · vlulozlo
+
+- `sv` now accepts `--output-channels` and `--input-channels` (1-based specs: `3`, `3,4`, `3-4`, `1,3-4`, or `all`) and the matching `[audio]` config keys `output_channels` and `input_channels` (array of 1-based integers or spec string).
+- `sv say` routes mono speech onto the chosen output channels and leaves all other channels silent; `sv listen` mixes only the chosen input channels instead of averaging every channel on the device. Out-of-range channel specs fail immediately before loading the speech models.
+- `sv devices` displays each device's channel count, and `sv devices --pick` prompts for channels when selecting a device with more than 2 channels. `skills/voice-say/SKILL.md` documents the new flags.
+
 #### reqwest 0.13 for the HTTP providers · 2026-11-20 19:52 · klqmsuqs
 
 - Voxtral, Gemini and ElevenLabs now use reqwest 0.13 and still connect over native-tls, as they did before. An app that already uses reqwest 0.13 with native-tls (Lumina, through rmcp) gets no new packages in its lock, and no longer has the dependency tree that made `cargo update -p simply-voice` fail its resolve. reqwest 0.12 is still in the tree through hf-hub (kyutai, pocket-tts).
